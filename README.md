@@ -67,6 +67,8 @@ Two switches next to *Speed* control where the mouse goes during playback:
 - **Start from current cursor:** the whole recording is shifted so it starts where your pointer is right now, instead of where it was when you recorded. Every repeat starts from that same spot. Useful for things that aren't always in the same place on screen.
 - **Adapt to screen resolution** (on by default): each macro remembers the resolution it was recorded on. If you play it on a different one (for example recorded on 2560×1440, played on 1920×1080), every mouse position is rescaled so it lands on the same spot of the screen. The status bar shows both resolutions. Parts you re-record on another screen are converted automatically too.
 
+**Screens.** Next to the mouse options, *Record on* picks the screen a recording belongs to (the one under the mouse when you start, a specific screen, or *All screens*) and *Play on* picks where it plays (the same screen(s) it was recorded on, or any screen you choose). Each macro remembers the monitor layout it was recorded with, so it doesn't matter how many screens are connected later: positions move to the matching screen (or the main one if that screen is unplugged), are rescaled to its resolution, and never end up off-screen. The status bar shows where it was recorded and where it will play.
+
 > Rescaling works best for apps and games that fill the screen and scale their UI with the resolution. If the aspect ratio changes (16:9 → 16:10), positions are stretched to match.
 
 ### Fix one part without redoing everything
@@ -99,7 +101,7 @@ Under **Settings** you'll also find window opacity, minimize to tray, auto-hide 
 - **Keys work like TinyTask's:** keys are played with the same Windows call TinyTask uses (`keybd_event` with the key code *and* the keyboard's scan code), so games and other programs that read scan codes see them too. New recordings also remember exactly which physical key was pressed (e.g. numpad Enter vs Enter, right vs left Ctrl/Alt). Re-record older macros if a key still isn't picked up.
 - **Mouse movement in games:** mouse moves are played as real mouse input (like a real mouse by default), not just by placing the pointer, so things that react to the mouse while you hold a key (selection wheels, dragging, camera) respond. If a program reacts oddly, try *Settings → Playback → Mouse movement → Like TinyTask*.
 - **Admin apps / some games:** Windows blocks input from normal programs into apps running as Administrator. Right-click the exe → **Run as administrator** if playback doesn't reach them.
-- **Multiple monitors:** resolution adapting uses your *primary* monitor's size. Record and play with the same monitor arrangement for best results.
+- **Multiple monitors:** macros recorded before version 0.0.4 only remember the main screen. If one was recorded on a second screen that isn't connected now, it's assumed that screen sat next to the main one. Re-record it for exact positions.
 - **Huge recordings:** *More ▾ → Simplify mouse moves* thins out mouse movement without touching clicks or keys.
 
 ## Run from source

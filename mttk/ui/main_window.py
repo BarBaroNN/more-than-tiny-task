@@ -6,9 +6,9 @@ import time
 from typing import List, Optional
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence, QUndoCommand, QUndoStack
+from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QUndoCommand, QUndoStack
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
-                               QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
+                               QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
                                QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox,
                                QProgressBar, QSpinBox, QSplitter, QSystemTrayIcon, QTableView,
                                QToolButton, QVBoxLayout, QWidget)
@@ -269,6 +269,26 @@ class MainWindow(QMainWindow):
         mv.addWidget(self.chk_adapt)
         prow.addWidget(mouse_opts)
 
+        screen_opts = QWidget()
+        sg = QGridLayout(screen_opts)
+        sg.setContentsMargins(0, 0, 0, 0)
+        sg.setHorizontalSpacing(6)
+        sg.setVerticalSpacing(4)
+        lbl = QLabel("SCREEN")
+        lbl.setObjectName("CardTitle")
+        sg.addWidget(lbl, 0, 0, 1, 2)
+        self.cmb_record_on = QComboBox()
+        self.cmb_record_on.setToolTip("Which screen new recordings belong to. Positions are stored relative to it,\n"
+                                      "so the macro can be played on any screen, whatever is connected.")
+        self.cmb_play_on = QComboBox()
+        self.cmb_play_on.setToolTip("Which screen to play on. Mouse positions are moved (and rescaled) from the\n"
+                                    "screen they were recorded on, and never end up off-screen.")
+        sg.addWidget(QLabel("Record on"), 1, 0)
+        sg.addWidget(self.cmb_record_on, 1, 1)
+        sg.addWidget(QLabel("Play on"), 2, 0)
+        sg.addWidget(self.cmb_play_on, 2, 1)
+        prow.addWidget(screen_opts)
+
         prog = QWidget()
         pv = QVBoxLayout(prog)
         pv.setContentsMargins(0, 0, 0, 0)
@@ -295,6 +315,16 @@ class MainWindow(QMainWindow):
         self.chk_relative.toggled.connect(self._save_playback_options)
         self.chk_adapt.toggled.connect(self._save_playback_options)
         self.chk_adapt.toggled.connect(lambda _on: self._update_screen_label())
+        self.cmb_record_on.activated.connect(self._screen_choice_changed)
+        self.cmb_play_on.activated.connect(self._screen_choice_changed)
+        self._refresh_screen_choices()
+        app = QGuiApplication.instance()
+        for sig in (app.screenAdded, app.screenRemoved, app.primaryScreenChanged):
+            sig.connect(lambda *_: QTimer.singleShot(400, self._on_screens_changed))
+        for scr in app.screens():
+            scr.geometryChanged.connect(lambda *_: QTimer.singleShot(400, self._on_screens_changed))
+        app.screenAdded.connect(lambda scr: scr.geometryChanged.connect(
+            lambda *_: QTimer.singleShot(400, self._on_screens_changed)))
         self.cmb_unit.currentTextChanged.connect(self._save_playback_options)
         root.addWidget(pb)
 
@@ -609,35 +639,59 @@ class MainWindow(QMainWindow):
             return
         self.undo.push(SetEventsCommand(self, self.events, new_events, text, self.meta, meta))
 
-    # ------------------------------------------------- screen / resolution
-    def _macro_screen(self):
-        scr = self.meta.get("screen")
-        return list(scr) if scr and len(scr) == 4 else None
+    # ------------------------------------------------- screens / resolution
+    def _refresh_screen_choices(self):
+        """Fill the Record on / Play on lists with the screens connected now."""
+        from ..screens import describe
+        mons = winutil.monitors()
+        screens = [(describe(mons, i), i) for i in range(len(mons))]
+        lists = ((self.cmb_record_on, [("Screen under the mouse", "auto")] + screens + [("All screens", "all")],
+                  self.settings.record_on),
+                 (self.cmb_play_on, [("Same screen(s) as recorded", "recorded")] + screens,
+                  self.settings.play_on))
+        for combo, items, current in lists:
+            combo.blockSignals(True)
+            combo.clear()
+            for text, data in items:
+                combo.addItem(text, data)
+            i = next((n for n, (_t, d) in enumerate(items) if d == current and type(d) is type(current)), 0)
+            combo.setCurrentIndex(i)
+            combo.blockSignals(False)
+
+    def _screen_choice_changed(self, *_):
+        self.settings.record_on = self.cmb_record_on.currentData()
+        self.settings.play_on = self.cmb_play_on.currentData()
+        self.settings.save()
+        self._update_screen_label()
+
+    def _on_screens_changed(self):
+        self._refresh_screen_choices()
+        self._update_screen_label()
+
+    def _screen_map(self):
+        """Maps this macro's positions onto the screens connected right now."""
+        from ..screens import ScreenMap
+        return ScreenMap(self.meta, winutil.monitors(), self.settings.play_on,
+                         scale=self.chk_adapt.isChecked(), events=self.events)
 
     def _update_screen_label(self):
-        scr = self._macro_screen()
-        if not self.events or not scr:
+        if not self.events:
             self.sb_screen.setText("")
             return
-        cur = winutil.primary_screen_rect()
-        txt = f"Recorded at {scr[2]}×{scr[3]}"
-        if cur and list(cur) != scr:
-            txt += f"  →  this screen {cur[2]}×{cur[3]}" + ("" if self.chk_adapt.isChecked() else " (not adapting)")
+        m = self._screen_map()
+        txt = m.summary()
+        if not self.chk_adapt.isChecked() and not m.is_identity():
+            txt += "  (not rescaling)"
         self.sb_screen.setText(txt)
-
-    def _to_current_screen(self, events):
-        """Macro coordinates → coordinates for the screen we're playing on."""
-        if not self.chk_adapt.isChecked():
-            return list(events)
-        return M.scale_events(events, self._macro_screen(), winutil.primary_screen_rect())
 
     def _prepare_for_playback(self, events, first_run=None):
         """Map to this screen and, for "start from current cursor", shift so the
         clip starts at the pointer. ``first_run`` (resuming mid-macro) gets the
         same shift as ``events`` so later full runs line up with it."""
-        events = self._to_current_screen(events)
+        screen_map = self._screen_map()
+        events = screen_map.map_events(events)
         if first_run is not None:
-            first_run = self._to_current_screen(first_run)
+            first_run = screen_map.map_events(first_run)
         if self.chk_relative.isChecked():
             start = M.first_position(first_run if first_run is not None else events)
             if start:
@@ -668,7 +722,7 @@ class MainWindow(QMainWindow):
         self.btn_play.setEnabled((idle and has) or self.state == PLAYING)
         self.btn_stop.setEnabled(not idle)
         for w in (self.spin_repeat, self.chk_infinite, self.spin_delay, self.cmb_unit, self.spin_speed,
-                  self.chk_relative, self.chk_adapt):
+                  self.chk_relative, self.chk_adapt, self.cmb_record_on, self.cmb_play_on):
             w.setEnabled(idle)
         if idle:
             self.spin_repeat.setEnabled(not self.chk_infinite.isChecked())
@@ -962,10 +1016,8 @@ class MainWindow(QMainWindow):
         mode = self._rec_ctx["mode"]
         if mode in ("replace", "insert") and self.settings.move_cursor_before_rerecord:
             pos = M.cursor_position_at(self.events, self._rec_ctx["start"])
-            if pos and self._macro_screen():
-                mapped = M.scale_events([Event(0.0, MOVE, x=pos[0], y=pos[1])], self._macro_screen(),
-                                        winutil.primary_screen_rect())
-                pos = (mapped[0].x, mapped[0].y)
+            if pos:
+                pos = self._screen_map().point(*pos)
             if pos:
                 try:
                     from ..backend import set_mouse_position
@@ -1012,6 +1064,10 @@ class MainWindow(QMainWindow):
         self.recorder = Recorder(record_moves=s.record_mouse_moves, move_interval=s.move_interval_ms / 1000,
                                  record_keyboard=s.record_keyboard, record_mouse=s.record_mouse,
                                  ignore_key=self._recording_ignored_keys())
+        from ..screens import resolve_record_on
+        mons = winutil.monitors()
+        self._rec_ctx["monitors"] = mons
+        self._rec_ctx["record_on"] = resolve_record_on(s.record_on, mons, winutil.cursor_pos())
         self.recorder.start()
         self.state = RECORDING
         ctx = self._rec_ctx
@@ -1058,14 +1114,21 @@ class MainWindow(QMainWindow):
         self.timeline.set_overlay("")
         self._restore_after_task()
         ctx = self._rec_ctx
-        current = winutil.primary_screen_rect()
         meta = dict(self.meta)
-        if ctx["mode"] == "new" or not self.events or not self._macro_screen():
-            if clip and current:
-                meta["screen"] = list(current)
-        elif current and self._macro_screen() != list(current):
-            # a take recorded on another resolution: store it in the macro's coordinates
-            clip = M.scale_events(clip, current, self._macro_screen())
+        if ctx["mode"] == "new" or not self.events:
+            if clip:
+                from ..screens import layout_meta
+                meta.update(layout_meta(ctx["monitors"], ctx["record_on"]))
+        else:
+            # a take recorded now (maybe on other screens): store it in the
+            # macro's own coordinates so it lines up with the rest
+            from ..screens import ALL
+            screen_map = self._screen_map()
+            clip = screen_map.inverse_events(clip)
+            meta["monitors"] = [list(r) for r in screen_map.recorded]
+            meta["record_on"] = screen_map.record_on
+            ref = screen_map.record_on if screen_map.record_on != ALL else 0
+            meta["screen"] = list(screen_map.recorded[ref])
         if ctx["mode"] == "new":
             if clip:
                 self.apply_edit(clip, "Record", meta)

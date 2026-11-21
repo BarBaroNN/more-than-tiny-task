@@ -94,6 +94,41 @@ def window_rect_physical(widget):
     return int(g.left() * r), int(g.top() * r), int((g.right() + 1) * r), int((g.bottom() + 1) * r)
 
 
+def monitors():
+    """Every monitor as [left, top, width, height] in physical pixels, the main
+    (primary) one first, then left to right."""
+    found = []
+    if IS_WINDOWS:
+        try:
+            MONITORENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC,
+                                                 ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+
+            def cb(hmon, _hdc, _rect, _data):
+                info = _MONITORINFO()
+                info.cbSize = ctypes.sizeof(_MONITORINFO)
+                if _user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+                    r = info.rcMonitor
+                    found.append((not (info.dwFlags & 1), r.left, r.top,
+                                  [r.left, r.top, r.right - r.left, r.bottom - r.top]))
+                return True
+
+            _user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(cb), 0)
+        except Exception:
+            found = []
+    if not found:
+        try:
+            from PySide6.QtGui import QGuiApplication
+            primary = QGuiApplication.primaryScreen()
+            for scr in QGuiApplication.screens():
+                g, r = scr.geometry(), scr.devicePixelRatio()
+                rect = [int(g.x() * r), int(g.y() * r), int(round(g.width() * r)), int(round(g.height() * r))]
+                found.append((scr is not primary, rect[0], rect[1], rect))
+        except Exception:
+            pass
+    found.sort(key=lambda m: m[:3])
+    return [m[3] for m in found] or [primary_screen_rect() or [0, 0, 1920, 1080]]
+
+
 def primary_screen_rect():
     """(left, top, width, height) of the primary monitor in physical pixels.
 
