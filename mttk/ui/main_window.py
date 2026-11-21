@@ -542,12 +542,22 @@ class MainWindow(QMainWindow):
         self.hotkeys = None
         try:
             from ..backend import HotkeyManager
-            self.hotkeys = HotkeyManager(self.bridge.hotkey.emit)
+            self.hotkeys = HotkeyManager(self.bridge.hotkey.emit, should_consume=self._should_consume_hotkey)
             self.hotkeys.set_bindings(self.settings.hotkeys)
             self.hotkeys.start()
         except Exception as exc:  # e.g. no display server on Linux
             self.hotkeys = None
             self.lbl_status.setText(f"Global hotkeys unavailable: {str(exc).splitlines()[0]}")
+
+    def _should_consume_hotkey(self, action: str) -> bool:
+        """Called from the keyboard hook thread: swallow this key press system-wide?
+
+        The stop key (Esc by default) only does something during playback, so
+        everywhere else it keeps working normally - including inside recordings.
+        """
+        if action == "stop":
+            return self.state == PLAYING
+        return True
 
     def _on_hotkey(self, action: str):
         if action == "record":
@@ -561,9 +571,11 @@ class MainWindow(QMainWindow):
             if self.state == PLAYING:
                 self.stop_playback()
             elif self.state == IDLE:
-                self.start_playback()
+                self.play()
         elif action == "stop":
-            self.stop_all()
+            # stops playback only; recording is stopped with the record key
+            if self.state == PLAYING:
+                self.stop_playback()
         elif action == "center":
             self.center_mouse()
 
@@ -650,6 +662,15 @@ class MainWindow(QMainWindow):
         b["rerecord"].setEnabled(idle and sel)
         b["insertrec"].setEnabled(idle)
         b["playsel"].setEnabled(idle and sel)
+        if idle:
+            if sel:
+                a, z = self.timeline.selection
+                self.lbl_run.setText(f"▶ Play uses selection {fmt_time(a, 2)} → {fmt_time(z, 2)}")
+                self.btn_play.setToolTip("Play the selected part (click an empty spot on the timeline to clear)")
+            else:
+                if self.lbl_run.text().startswith("▶"):
+                    self.lbl_run.setText("")
+                self.btn_play.setToolTip("Play the macro")
         self.timeline.read_only = not idle
         self.table.setEnabled(idle)
         self._update_title()
@@ -886,7 +907,7 @@ class MainWindow(QMainWindow):
         self._update_state_ui()
 
     def _show_countdown(self):
-        msg = f"Recording starts in {self._countdown_left}…   ({self._hk('stop')} to cancel)"
+        msg = f"Recording starts in {self._countdown_left}…   ({self._hk('record')} to cancel)"
         self.lbl_status.setText(msg)
         self.timeline.set_overlay(msg)
         if self.settings.show_osd:
@@ -914,7 +935,7 @@ class MainWindow(QMainWindow):
         s = self.settings
         self.recorder = Recorder(record_moves=s.record_mouse_moves, move_interval=s.move_interval_ms / 1000,
                                  record_keyboard=s.record_keyboard, record_mouse=s.record_mouse,
-                                 ignore_key=self.hotkeys.is_hotkey_key if self.hotkeys else None)
+                                 ignore_key=self._recording_ignored_keys())
         self.recorder.start()
         self.state = RECORDING
         ctx = self._rec_ctx
@@ -930,6 +951,14 @@ class MainWindow(QMainWindow):
             self._hide_for_task()
         self.rec_timer.start()
         self._tick_recording()
+
+    def _recording_ignored_keys(self):
+        """Hotkeys that act during recording (record/play/centre) are never recorded.
+        The stop key is not one of them, so e.g. Esc is recorded like any other key."""
+        if not self.hotkeys:
+            return None
+        keys = frozenset(self.hotkeys.keys_for(("record", "play", "center")))
+        return lambda name: name in keys
 
     def _tick_recording(self):
         if not self.recorder:
@@ -985,8 +1014,18 @@ class MainWindow(QMainWindow):
         if self.state == PLAYING:
             self.stop_playback()
         elif self.state == IDLE:
-            self.start_playback()
+            self.play()
         self._update_state_ui()
+
+    def play(self):
+        """Play button / play hotkey: the selected range if there is one, else everything."""
+        sel = self._sel()
+        if sel:
+            i, j = M.index_range(self.events, *sel)
+            if j > i:
+                self.start_playback(events=M.slice_range(self.events, *sel), offset=sel[0])
+                return
+        self.start_playback()
 
     def play_selection(self):
         sel = self._sel()

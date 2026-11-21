@@ -15,7 +15,7 @@ HOTKEY_LABELS = {
     "record": "Record / stop",
     "play": "Play / stop",
     "center": "Centre mouse",
-    "stop": "Emergency stop",
+    "stop": "Stop playback",
 }
 
 

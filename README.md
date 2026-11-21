@@ -45,15 +45,18 @@ More Than Tiny Task keeps the same **record → play** simplicity and adds:
 | Key | What it does |
 |-----|--------------|
 | **F8**  | Start / stop recording |
-| **F9**  | Start / stop playback |
-| **Esc** | Emergency stop |
-| **F10** | Glide the mouse to the centre of the screen |
+| **F9**  | Start / stop playback (plays only the selected part if you've selected one) |
+| **Esc** | Stop playback |
+| **F10** | Glide the mouse to the centre of the screen. Works while recording, and the glide is recorded |
 
-All hotkeys work while other windows are focused and can be changed in **Settings → Hotkeys**. They are never recorded into your macro.
+All hotkeys work while other windows are focused and can be changed in **Settings → Hotkeys**.
+F8, F9 and F10 are never recorded and never reach the app you're using, so F10 won't open its menu bar.
+**Esc only stops playback.** While recording it's just a normal key (and gets recorded), so the only way to stop a recording is F8.
 
 1. Press **F8**, do your thing, press **F8** again.
 2. Set **Repeat** (or tick *Unlimited*), an optional **Delay between runs**, and the **Speed**.
 3. Press **F9**. Press **Esc** at any time to stop.
+   If a part of the timeline is selected, **F9 plays just that part**, with the same repeat / delay / speed settings. Click an empty spot on the timeline to clear the selection.
 4. **Ctrl+S** saves the macro as a `.mttk` file. Drag a file onto the window to open it.
 
 ### Mouse options

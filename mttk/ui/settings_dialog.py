@@ -201,7 +201,8 @@ class SettingsDialog(QDialog):
             e.changed.connect(self._check_conflicts)
         note = QLabel("Click a box, then press the key or combination (e.g. Ctrl+Shift+R).\n"
                       "Hotkeys work globally, even when another window is focused.\n"
-                      "Hotkey keys themselves are never recorded.")
+                      "Record, play and centre keys are never recorded and don't reach other apps.\n"
+                      "The stop-playback key only does something while a macro is playing.")
         note.setObjectName("Faint")
         f.addRow("", note)
         tabs.addTab(w, "Hotkeys")

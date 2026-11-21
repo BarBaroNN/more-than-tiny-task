@@ -123,3 +123,37 @@ def pynput_from_event(e: Event):
     if e.vk:
         return KeyCode.from_vk(e.vk)
     return KeyCode.from_char(e.char or " ")
+
+
+_NAME_TO_VK = {
+    "esc": 0x1B, "pause": 0x13, "insert": 0x2D, "delete": 0x2E, "home": 0x24, "end": 0x23,
+    "page_up": 0x21, "page_down": 0x22, "scroll_lock": 0x91, "num_lock": 0x90,
+    "caps_lock": 0x14, "space": 0x20, "tab": 0x09, "up": 0x26, "down": 0x28,
+    "left": 0x25, "right": 0x27, "print_screen": 0x2C, "backspace": 0x08,
+    "enter": 0x0D, "menu": 0x5D,
+}
+
+# Windows virtual-key codes of the modifier keys
+VK_MODIFIERS = {
+    0x10: "shift", 0xA0: "shift", 0xA1: "shift",
+    0x11: "ctrl", 0xA2: "ctrl", 0xA3: "ctrl",
+    0x12: "alt", 0xA4: "alt", 0xA5: "alt",
+    0x5B: "win", 0x5C: "win",
+}
+
+
+def name_to_vk(name: str) -> int:
+    """Windows virtual-key code for a hotkey key name (0 if unknown)."""
+    if not name:
+        return 0
+    if name in _NAME_TO_VK:
+        return _NAME_TO_VK[name]
+    if len(name) == 1 and ("a" <= name <= "z" or "0" <= name <= "9"):
+        return ord(name.upper())
+    if name.startswith("num") and name[3:].isdigit():
+        return 0x60 + int(name[3:])
+    if name.startswith("f") and name[1:].isdigit() and 1 <= int(name[1:]) <= 24:
+        return 0x6F + int(name[1:])
+    if name.startswith("vk") and name[2:].isdigit():
+        return int(name[2:])
+    return 0

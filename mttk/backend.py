@@ -24,30 +24,50 @@ def _injected(args) -> bool:
 # ------------------------------------------------------------------ hotkeys
 
 class HotkeyManager:
-    """Listens globally for configurable hotkeys."""
+    """Listens globally for configurable hotkeys.
 
-    def __init__(self, on_trigger: Callable[[str], None]):
+    On Windows, hotkeys that do something are swallowed system-wide so the
+    focused app never sees them (F10 would otherwise open its menu bar, F8/F9
+    would reach the app being recorded, ...). ``should_consume(action)`` decides
+    per press whether to swallow; e.g. Esc is only swallowed while playing.
+    """
+
+    def __init__(self, on_trigger: Callable[[str], None],
+                 should_consume: Optional[Callable[[str], bool]] = None):
         self._on_trigger = on_trigger
+        self.should_consume = should_consume or (lambda action: True)
         self._bindings: Dict[tuple, str] = {}
+        self._vk_bindings: Dict[tuple, str] = {}
         self._mods = set()
+        self._vk_mods: Dict[int, str] = {}
+        self._down_vks = set()
+        self._swallowed = set()
         self._listener = None
         self.enabled = True
 
     def set_bindings(self, bindings: Dict[str, str]) -> None:
         """``bindings`` maps an action name to a hotkey string."""
-        table = {}
+        table, vk_table = {}, {}
         for action, text in bindings.items():
             mods, key = K.parse_hotkey(text)
             if key:
                 table[(mods, key)] = action
+                vk = K.name_to_vk(key)
+                if vk:
+                    vk_table[(mods, vk)] = action
         self._bindings = table
+        self._vk_bindings = vk_table
 
-    def is_hotkey_key(self, name: str) -> bool:
-        return any(key == name for (_m, key) in self._bindings)
+    def keys_for(self, actions) -> set:
+        """Key names bound to any of ``actions``."""
+        return {key for (_m, key), a in self._bindings.items() if a in actions}
 
     def start(self) -> None:
         from pynput import keyboard
-        self._listener = keyboard.Listener(on_press=self._press, on_release=self._release)
+        kwargs = {}
+        if winutil.IS_WINDOWS:
+            kwargs["win32_event_filter"] = self._win32_filter
+        self._listener = keyboard.Listener(on_press=self._press, on_release=self._release, **kwargs)
         self._listener.daemon = True
         self._listener.start()
 
@@ -56,6 +76,42 @@ class HotkeyManager:
             self._listener.stop()
             self._listener = None
 
+    # -- Windows: runs synchronously inside the low-level keyboard hook
+    def _win32_filter(self, msg, data):
+        if data.flags & 0x12:  # LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED
+            return True
+        vk = int(data.vkCode)
+        down = msg in (0x0100, 0x0104)   # WM_KEYDOWN, WM_SYSKEYDOWN
+        up = msg in (0x0101, 0x0105)     # WM_KEYUP, WM_SYSKEYUP
+        mod = K.VK_MODIFIERS.get(vk)
+        if mod:
+            if down:
+                self._vk_mods[vk] = mod
+            elif up:
+                self._vk_mods.pop(vk, None)
+            return True
+        if up:
+            self._down_vks.discard(vk)
+            if vk in self._swallowed:
+                self._swallowed.discard(vk)
+                self._listener.suppress_event()
+            return True
+        if not down or not self.enabled:
+            return True
+        action = self._vk_bindings.get((frozenset(self._vk_mods.values()), vk))
+        if not action:
+            return True
+        first = vk not in self._down_vks   # ignore key auto-repeat
+        self._down_vks.add(vk)
+        consume = self.should_consume(action)
+        if first:
+            self._on_trigger(action)
+        if consume:
+            self._swallowed.add(vk)
+            self._listener.suppress_event()
+        return False  # handled here; don't run _press for it
+
+    # -- other platforms (and modifier tracking)
     def _press(self, key, *args):
         if _injected(args):
             return
@@ -64,7 +120,7 @@ class HotkeyManager:
         if mod:
             self._mods.add(mod)
             return
-        if not self.enabled:
+        if not self.enabled or winutil.IS_WINDOWS:
             return
         action = self._bindings.get((frozenset(self._mods), name))
         if action:
