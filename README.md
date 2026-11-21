@@ -96,6 +96,7 @@ Under **Settings** you'll also find window opacity, minimize to tray, auto-hide 
 
 ## Tips
 
+- **Keys work like TinyTask's:** keys are played with the same Windows call TinyTask uses (`keybd_event` with the key code *and* the keyboard's scan code), so games and other programs that read scan codes see them too. New recordings also remember exactly which physical key was pressed (e.g. numpad Enter vs Enter, right vs left Ctrl/Alt). Re-record older macros if a key still isn't picked up.
 - **Admin apps / some games:** Windows blocks input from normal programs into apps running as Administrator. Right-click the exe → **Run as administrator** if playback doesn't reach them.
 - **Multiple monitors:** resolution adapting uses your *primary* monitor's size. Record and play with the same monitor arrangement for best results.
 - **Huge recordings:** *More ▾ → Simplify mouse moves* thins out mouse movement without touching clicks or keys.

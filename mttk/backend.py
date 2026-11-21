@@ -6,6 +6,7 @@ them into Qt signals.
 """
 from __future__ import annotations
 
+import collections
 import math
 import threading
 import time
@@ -150,6 +151,7 @@ class Recorder:
         self._t0 = 0.0
         self._last_move = -1.0
         self._listeners = []
+        self._hw_keys = collections.deque()  # (vk, scan, extended) from the hook, in order
         self.running = False
 
     def elapsed(self) -> float:
@@ -170,7 +172,9 @@ class Recorder:
             ml.start()
             self._listeners.append(ml)
         if self.record_keyboard:
-            kl = keyboard.Listener(on_press=self._press, on_release=self._release)
+            self._hw_keys.clear()
+            kwargs = {"win32_event_filter": self._win32_key_filter} if winutil.IS_WINDOWS else {}
+            kl = keyboard.Listener(on_press=self._press, on_release=self._release, **kwargs)
             kl.daemon = True
             kl.start()
             self._listeners.append(kl)
@@ -233,18 +237,45 @@ class Recorder:
             return
         self._add(Event(self._now(), SCROLL, x=int(x), y=int(y), dx=int(dx), dy=int(dy)))
 
+    def _win32_key_filter(self, msg, data):
+        """Runs in the hook for every key; pynput calls ``_press`` / ``_release``
+        for each one afterwards, in the same order. Remember what the keyboard
+        actually sent (scan code, E0 flag) for real, non-injected keys."""
+        if not data.flags & 0x12:  # LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED
+            vk = int(data.vkCode)
+            if vk == 0xE7:  # VK_PACKET: "scanCode" is a unicode character, not a key
+                self._hw_keys.append((vk, 0, False))
+            else:
+                self._hw_keys.append((vk, int(data.scanCode) & 0xFF, bool(data.flags & 0x01)))
+        return True
+
     def _press(self, key, *args):
         self._key(key, True, args)
 
     def _release(self, key, *args):
         self._key(key, False, args)
 
+    def _hardware_info(self, key) -> tuple:
+        """Scan code and extended flag of this (non-injected) key event."""
+        if not winutil.IS_WINDOWS:
+            return 0, False
+        try:
+            vk, scan, ext = self._hw_keys.popleft()
+        except IndexError:
+            return 0, False
+        key_vk = getattr(key, "vk", None) or getattr(getattr(key, "value", None), "vk", None)
+        if key_vk and key_vk != vk and K.GENERIC_MODIFIER_VK.get(key_vk) != K.GENERIC_MODIFIER_VK.get(vk, -1):
+            self._hw_keys.clear()  # out of step: don't attach the wrong scan code
+            return 0, False
+        return scan, ext
+
     def _key(self, key, pressed, args):
-        if not self.running or _injected(args):
+        if _injected(args):
             return
-        if self.ignore_key(K.pynput_key_name(key)):
+        scan, ext = self._hardware_info(key)
+        if not self.running or self.ignore_key(K.pynput_key_name(key)):
             return
-        self._add(K.event_from_pynput(key, pressed, self._now()))
+        self._add(K.event_from_pynput(key, pressed, self._now(), scan, ext))
 
 
 # ------------------------------------------------------------------- player
@@ -294,6 +325,7 @@ class Player:
         self._thread: Optional[threading.Thread] = None
         self._held_keys = {}
         self._held_buttons = set()
+        self.win_keys = winutil.IS_WINDOWS  # send keys with keybd_event like TinyTask
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="mttk-player", daemon=True)
@@ -392,12 +424,16 @@ class Player:
             self._mouse.position = (e.x, e.y)
             self._mouse.scroll(e.dx, e.dy)
         elif e.kind == KEY:
-            key = K.pynput_from_event(e)
+            params = K.win_key_params(e, winutil.vk_to_scan, winutil.char_to_vk) if self.win_keys else None
+            if params:
+                winutil.keybd_event(*params)
+                key = ("win", params[0], params[1], params[2] & ~winutil.KEYEVENTF_KEYUP)
+            else:
+                key = K.pynput_from_event(e)
+                (self._kb.press if e.pressed else self._kb.release)(key)
             if e.pressed:
-                self._kb.press(key)
                 self._held_keys[e.key_id] = key
             else:
-                self._kb.release(key)
                 self._held_keys.pop(e.key_id, None)
 
     def _release_all(self) -> None:
@@ -405,7 +441,11 @@ class Player:
             return
         for key in list(self._held_keys.values()):
             try:
-                self._kb.release(key)
+                if isinstance(key, tuple) and key[0] == "win":
+                    _, vk, scan, flags = key
+                    winutil.keybd_event(vk, scan, flags | winutil.KEYEVENTF_KEYUP)
+                else:
+                    self._kb.release(key)
             except Exception:
                 pass
         self._held_keys.clear()

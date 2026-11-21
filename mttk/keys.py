@@ -104,13 +104,14 @@ def qt_key_to_name(qt_key: int, text: str = "") -> Optional[str]:
     return None
 
 
-def event_from_pynput(key, pressed: bool, t: float) -> Event:
+def event_from_pynput(key, pressed: bool, t: float, scan: int = 0, ext: bool = False) -> Event:
+    """``scan`` / ``ext``: the hardware scan code and extended flag, when known."""
     name = getattr(key, "name", None)
     if name:
         vk = getattr(getattr(key, "value", None), "vk", 0) or 0
-        return Event(t, KEY, pressed=pressed, key_name=name, vk=vk)
+        return Event(t, KEY, pressed=pressed, key_name=name, vk=vk, scan=scan, ext=ext)
     return Event(t, KEY, pressed=pressed, vk=getattr(key, "vk", 0) or 0,
-                 char=getattr(key, "char", "") or "")
+                 char=getattr(key, "char", "") or "", scan=scan, ext=ext)
 
 
 def pynput_from_event(e: Event):
@@ -157,3 +158,52 @@ def name_to_vk(name: str) -> int:
     if name.startswith("vk") and name[2:].isdigit():
         return int(name[2:])
     return 0
+
+
+# ------------------------------------------------- playback the TinyTask way
+
+# Left/right modifier virtual keys -> the generic key TinyTask sends. Which
+# side is pressed is carried by the scan code / extended flag instead.
+GENERIC_MODIFIER_VK = {0xA0: 0x10, 0xA1: 0x10, 0xA2: 0x11, 0xA3: 0x11, 0xA4: 0x12, 0xA5: 0x12}
+
+# pynput Key names -> virtual-key codes (Windows), for events saved without a vk
+_KEY_NAME_VK = {
+    "alt": 0x12, "alt_l": 0xA4, "alt_r": 0xA5, "alt_gr": 0xA5, "backspace": 0x08,
+    "caps_lock": 0x14, "cmd": 0x5B, "cmd_l": 0x5B, "cmd_r": 0x5C, "ctrl": 0x11,
+    "ctrl_l": 0xA2, "ctrl_r": 0xA3, "delete": 0x2E, "down": 0x28, "end": 0x23,
+    "enter": 0x0D, "esc": 0x1B, "home": 0x24, "left": 0x25, "page_down": 0x22,
+    "page_up": 0x21, "right": 0x27, "shift": 0xA0, "shift_l": 0xA0, "shift_r": 0xA1,
+    "space": 0x20, "tab": 0x09, "up": 0x26, "insert": 0x2D, "menu": 0x5D,
+    "num_lock": 0x90, "pause": 0x13, "print_screen": 0x2C, "scroll_lock": 0x91,
+    "media_play_pause": 0xB3, "media_stop": 0xB2, "media_volume_mute": 0xAD,
+    "media_volume_down": 0xAE, "media_volume_up": 0xAF, "media_previous": 0xB1,
+    "media_next": 0xB0,
+}
+_KEY_NAME_VK.update({f"f{n}": 0x6F + n for n in range(1, 25)})
+
+
+def tinytask_extended(vk: int) -> bool:
+    """Whether a key needs KEYEVENTF_EXTENDEDKEY, for keys recorded without the
+    hardware flag. TinyTask's rule (PgUp..Delete block, Ctrl, both Win keys,
+    Menu) plus the right-hand Ctrl / Alt, NumLock, numpad / and media keys."""
+    return (0x21 <= vk <= 0x2E or vk in (0x11, 0x5B, 0x5C, 0x5D, 0xA3, 0xA5, 0x90, 0x6F)
+            or 0xA6 <= vk <= 0xB7)
+
+
+def win_key_params(e: Event, vk_to_scan, char_to_vk) -> Optional[Tuple[int, int, int]]:
+    """``(vk, scan, flags)`` to pass to ``keybd_event`` for a key event, the way
+    TinyTask plays keys: virtual key + scan code + extended flag (+ key-up).
+
+    Recordings made by this version carry the real hardware scan code and
+    extended flag; older ones fall back to MapVirtualKey and TinyTask's rule.
+    ``None`` if the key can't be expressed as a virtual key.
+    """
+    vk = e.vk or _KEY_NAME_VK.get(e.key_name, 0) or char_to_vk(e.char)
+    if not vk:
+        return None
+    if e.scan:
+        scan, ext = e.scan, e.ext
+    else:
+        scan, ext = vk_to_scan(vk), tinytask_extended(vk)
+    flags = (0x0001 if ext else 0) | (0 if e.pressed else 0x0002)
+    return GENERIC_MODIFIER_VK.get(vk, vk), scan & 0xFF, flags

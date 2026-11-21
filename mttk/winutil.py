@@ -113,3 +113,39 @@ def primary_screen_rect():
         return [int(g.x() * r), int(g.y() * r), int(round(g.width() * r)), int(round(g.height() * r))]
     except Exception:
         return None
+
+
+# ------------------------------------------------------------- key injection
+# The same calls TinyTask uses to play keys back: keybd_event with the key's
+# virtual-key code *and* its hardware scan code (plus the extended flag for
+# keys on the E0 prefix), so programs that read scan codes (games, DirectInput,
+# raw input, remote desktops) see the key as well as normal Windows apps.
+
+KEYEVENTF_EXTENDEDKEY = 0x0001
+KEYEVENTF_KEYUP = 0x0002
+
+if IS_WINDOWS:
+    _user32.keybd_event.argtypes = [ctypes.c_ubyte, ctypes.c_ubyte, wintypes.DWORD, ctypes.c_size_t]
+    _user32.keybd_event.restype = None
+    _user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+    _user32.MapVirtualKeyW.restype = wintypes.UINT
+    _user32.VkKeyScanW.argtypes = [wintypes.WCHAR]
+    _user32.VkKeyScanW.restype = ctypes.c_short
+
+
+def keybd_event(vk: int, scan: int, flags: int) -> None:
+    if IS_WINDOWS:
+        _user32.keybd_event(vk & 0xFF, scan & 0xFF, flags, 0)
+
+
+def vk_to_scan(vk: int) -> int:
+    """MapVirtualKey(vk, MAPVK_VK_TO_VSC): the scan code of a virtual key."""
+    return int(_user32.MapVirtualKeyW(vk, 0)) if IS_WINDOWS else 0
+
+
+def char_to_vk(char: str) -> int:
+    """VkKeyScan: the virtual key that types ``char`` on this layout (0 if none)."""
+    if not IS_WINDOWS or not char or len(char) != 1:
+        return 0
+    res = int(_user32.VkKeyScanW(char))
+    return 0 if res == -1 or (res & 0xFF) == 0xFF else res & 0xFF

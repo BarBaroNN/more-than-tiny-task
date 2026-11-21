@@ -45,6 +45,10 @@ class Event:
     key_name: str = ""
     vk: int = 0
     char: str = ""
+    # key: hardware scan code and E0 "extended" flag as recorded (0 / False if
+    # unknown); played back exactly so scan-code readers see the same key
+    scan: int = 0
+    ext: bool = False
 
     def shifted(self, dt: float) -> "Event":
         return replace(self, t=max(0.0, self.t + dt))
