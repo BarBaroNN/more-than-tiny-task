@@ -1,14 +1,14 @@
 # Releasing a new version
 
-1. Bump `__version__` in `mttk/__init__.py` (e.g. `1.1.0`) and commit to `main`.
-2. Tag and push:
-   ```bash
-   git tag v1.1.0
-   git push origin v1.1.0
-   ```
-3. GitHub Actions builds `MoreThanTinyTask.exe`, runs the tests and publishes a
-   Release with the exe attached (Actions tab → *Build & Release*).
-   Release notes are generated from the commits since the last tag.
+1. Bump `__version__` in `mttk/__init__.py` (e.g. `1.0.0` → `1.1.0`).
+2. Commit and push to `main`.
 
-The download link `releases/latest/download/MoreThanTinyTask.exe` in the README
+GitHub Actions (*Build & Release*) runs the tests, builds `MoreThanTinyTask.exe`
+and, because no release `v1.1.0` exists yet, publishes one with the exe and its
+SHA-256 checksum attached. Release notes are generated from the commits since
+the previous release. Pushes that don't change the version just build.
+
+(Pushing a tag like `v1.1.0` also publishes a release.)
+
+The README's download link, `releases/latest/download/MoreThanTinyTask.exe`,
 always points at the newest release.

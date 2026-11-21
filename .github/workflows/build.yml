@@ -38,16 +38,35 @@ jobs:
             dist/MoreThanTinyTask.exe
             dist/SHA256SUMS.txt
 
-      # Pushing a tag like v1.2.0 publishes a GitHub Release with the exe attached
+      # A push to main whose version (mttk/__init__.py) has no release yet
+      # publishes one, tagged v<version>, with the exe attached.
+      - name: Check whether this version needs a release
+        id: ver
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(python -c "import mttk; print(mttk.__version__)")
+          echo "tag=v$v" >> "$GITHUB_OUTPUT"
+          if gh release view "v$v" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.ver.outputs.release == 'true' || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          name: More Than Tiny Task ${{ github.ref_name }}
+          tag_name: ${{ steps.ver.outputs.tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: More Than Tiny Task ${{ steps.ver.outputs.tag || github.ref_name }}
           generate_release_notes: true
+          make_latest: true
           body: |
             ## Download
-            **[MoreThanTinyTask.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/MoreThanTinyTask.exe)** — Windows 10/11, no install needed. Just run it.
+            **MoreThanTinyTask.exe** (below, under *Assets*) — Windows 10/11, no install needed. Just run it.
 
             > Windows may show *"Windows protected your PC"* because the app isn't code-signed. Click **More info → Run anyway**.
           files: |
