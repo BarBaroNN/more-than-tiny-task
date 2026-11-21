@@ -317,6 +317,7 @@ class MainWindow(QMainWindow):
         self.chk_adapt.toggled.connect(lambda _on: self._update_screen_label())
         self.cmb_record_on.activated.connect(self._screen_choice_changed)
         self.cmb_play_on.activated.connect(self._screen_choice_changed)
+        self._remember_layout()
         self._refresh_screen_choices()
         app = QGuiApplication.instance()
         for sig in (app.screenAdded, app.screenRemoved, app.primaryScreenChanged):
@@ -665,14 +666,39 @@ class MainWindow(QMainWindow):
         self._update_screen_label()
 
     def _on_screens_changed(self):
+        self._remember_layout()
         self._refresh_screen_choices()
         self._update_screen_label()
+
+    def _remember_layout(self):
+        """Keep the monitor layouts this PC has had, so old macros recorded on a
+        screen that is unplugged now can still be placed exactly."""
+        from ..screens import remember_layout, same_layout
+        mons = winutil.monitors()
+        known = self.settings.known_layouts or []
+        if not known or not same_layout(known[0], mons):
+            self.settings.known_layouts = remember_layout(known, mons)
+            self.settings.save()
+
+    def _upgrade_legacy_meta(self) -> bool:
+        """Macros saved before 0.0.4 only stored the main screen. Work out the
+        layout they were recorded on (connected now or seen before) and keep it
+        in the macro, so it's written to the file on the next save."""
+        from ..screens import find_legacy_layout
+        if self.meta.get("monitors") or not self.events:
+            return False
+        found = find_legacy_layout(self.meta, self.events,
+                                   [winutil.monitors()] + list(self.settings.known_layouts or []))
+        if found:
+            self.meta.update(found)
+        return bool(found)
 
     def _screen_map(self):
         """Maps this macro's positions onto the screens connected right now."""
         from ..screens import ScreenMap
         return ScreenMap(self.meta, winutil.monitors(), self.settings.play_on,
-                         scale=self.chk_adapt.isChecked(), events=self.events)
+                         scale=self.chk_adapt.isChecked(), events=self.events,
+                         known_layouts=self.settings.known_layouts)
 
     def _update_screen_label(self):
         if not self.events:
@@ -1339,15 +1365,19 @@ class MainWindow(QMainWindow):
         self.settings.save()
         self.undo.clear()
         self.meta = dict(macro.meta or {})
+        self.events = list(macro.events)
+        upgraded = self._upgrade_legacy_meta()
         self._set_events(macro.events)
         self.timeline.set_selection(None)
         self.timeline.set_playhead(0.0, emit=True)
         self.timeline.zoom_fit()
-        self.lbl_status.setText(f"Opened {os.path.basename(path)}")
+        self.lbl_status.setText(f"Opened {os.path.basename(path)}"
+                                + ("  ·  screen layout found, saved with the macro on the next save" if upgraded else ""))
 
     def save(self) -> bool:
         if not self.file_path:
             return self.save_as()
+        self._upgrade_legacy_meta()
         try:
             Macro(self.events, meta={**self.meta, "app_version": __version__}).save(self.file_path)
         except Exception as exc:

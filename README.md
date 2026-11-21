@@ -101,7 +101,7 @@ Under **Settings** you'll also find window opacity, minimize to tray, auto-hide 
 - **Keys work like TinyTask's:** keys are played with the same Windows call TinyTask uses (`keybd_event` with the key code *and* the keyboard's scan code), so games and other programs that read scan codes see them too. New recordings also remember exactly which physical key was pressed (e.g. numpad Enter vs Enter, right vs left Ctrl/Alt). Re-record older macros if a key still isn't picked up.
 - **Mouse movement in games:** mouse moves are played as real mouse input (like a real mouse by default), not just by placing the pointer, so things that react to the mouse while you hold a key (selection wheels, dragging, camera) respond. If a program reacts oddly, try *Settings → Playback → Mouse movement → Like TinyTask*.
 - **Admin apps / some games:** Windows blocks input from normal programs into apps running as Administrator. Right-click the exe → **Run as administrator** if playback doesn't reach them.
-- **Multiple monitors:** macros recorded before version 0.0.4 only remember the main screen. If one was recorded on a second screen that isn't connected now, it's assumed that screen sat next to the main one. Re-record it for exact positions.
+- **Older macros (before 0.0.4)** only remember the main screen. When you open one, the app finds the screen it was recorded on: one connected now, or a screen layout it has seen on this PC before. That layout is saved into the macro the next time you save it. If neither is possible, it assumes the screen sat next to the main one, and positions always stay on-screen.
 - **Huge recordings:** *More ▾ → Simplify mouse moves* thins out mouse movement without touching clicks or keys.
 
 ## Run from source

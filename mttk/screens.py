@@ -81,6 +81,47 @@ def layout_meta(monitors: Sequence[Rect], record_on) -> dict:
     return {"monitors": mons, "record_on": record_on, "screen": list(ref)}
 
 
+def same_layout(a: Sequence[Rect], b: Sequence[Rect]) -> bool:
+    return [_rect(r) for r in a] == [_rect(r) for r in b]
+
+
+def remember_layout(known: list, layout: Sequence[Rect], limit: int = 12) -> list:
+    """``known`` with ``layout`` moved / added to the front (most recent first)."""
+    layout = [list(_rect(r)) for r in layout]
+    rest = [k for k in (known or []) if not same_layout(k, layout)]
+    return [layout] + rest[:limit - 1]
+
+
+def find_legacy_layout(meta: dict, events: Sequence[Event], layouts: Sequence[Sequence[Rect]]) -> Optional[dict]:
+    """Layout metadata for a macro saved without it (before 0.0.4: only the
+    main screen's rect), or None if it can't be told.
+
+    Positions on the stored main screen keep meaning "the main screen". If
+    they lie elsewhere, the layout they were recorded on is looked up in
+    ``layouts``: the first one is the layout connected now (any of its screens
+    may hold them), the others are layouts seen before (their main screen must
+    match the stored one).
+    """
+    if meta.get("monitors"):
+        return None
+    pts = [(e.x, e.y) for e in events if e.kind in POSITIONAL]
+    main = _rect(meta["screen"]) if meta.get("screen") and len(meta["screen"]) == 4 else None
+    if not pts:
+        return None
+    if main and sum(contains(main, *p) for p in pts) * 2 > len(pts):
+        return layout_meta([main], 0)
+    for n, layout in enumerate(layouts):
+        mons = [_rect(r) for r in layout or []]
+        if not mons or (n > 0 and main and mons[0] != main):
+            continue
+        inside = [p for p in pts if any(contains(r, *p) for r in mons)]
+        if len(inside) < 0.98 * len(pts):
+            continue
+        used = {monitor_at(mons, *p) for p in inside}
+        return layout_meta(mons, used.pop() if len(used) == 1 else ALL)
+    return None
+
+
 class ScreenMap:
     """Maps positions from the layout a macro was recorded on to this one.
 
@@ -93,11 +134,16 @@ class ScreenMap:
     """
 
     def __init__(self, meta: dict, current: Sequence[Rect], play_on=PLAY_RECORDED,
-                 scale: bool = True, events: Sequence[Event] = ()):
+                 scale: bool = True, events: Sequence[Event] = (), known_layouts=()):
         self.current: List[Rect] = [_rect(r) for r in current] or [(0, 0, 1920, 1080)]
         self.play_on = play_on if isinstance(play_on, int) and 0 <= play_on < len(self.current) else PLAY_RECORDED
         self.scale = scale
         self.note = ""
+        if not meta.get("monitors"):
+            # old macro: work out the layout it was recorded on, if we can
+            found = find_legacy_layout(meta, events, [self.current] + list(known_layouts or []))
+            if found:
+                meta = found
         mons = meta.get("monitors")
         if mons:
             self.recorded: List[Rect] = [_rect(r) for r in mons]

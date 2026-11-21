@@ -50,6 +50,7 @@ class Settings:
     mouse_move_mode: str = "relative"  # 'relative' (like a mouse), 'absolute' (TinyTask) or 'set'
     record_on: object = "auto"        # 'auto' (screen under the mouse), 'all' or a screen index
     play_on: object = "recorded"      # 'recorded' (same screen(s)) or a screen index
+    known_layouts: list = field(default_factory=list)  # monitor layouts seen, newest first
     # mouse centring
     center_target: str = "cursor"  # 'cursor' or 'primary'
     center_duration_ms: int = 350
