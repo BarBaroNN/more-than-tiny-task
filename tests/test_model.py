@@ -84,3 +84,27 @@ def test_save_load_roundtrip():
     path = os.path.join(tempfile.mkdtemp(), "m.mttk")
     M.Macro(events).save(path)
     assert M.Macro.load(path).events == events
+
+
+def test_scale_events_2k_to_1080p():
+    events = [ev(0.0, x=2560 // 2, y=1440 // 2), ev(0.1, CLICK, x=2559, y=0, button="left"),
+              ev(0.2, KEY, key_name="enter")]
+    out = M.scale_events(events, (0, 0, 2560, 1440), (0, 0, 1920, 1080))
+    assert (out[0].x, out[0].y) == (960, 540)
+    assert (out[1].x, out[1].y) == (1919, 0)
+    assert out[2] == events[2]
+
+
+def test_scale_events_identity_and_offset_origin():
+    events = [ev(0.0, x=100, y=100)]
+    assert M.scale_events(events, (0, 0, 1920, 1080), (0, 0, 1920, 1080)) == events
+    out = M.scale_events([ev(0.0, x=-1920, y=0)], (-1920, 0, 1920, 1080), (0, 0, 1280, 720))
+    assert (out[0].x, out[0].y) == (0, 0)
+
+
+def test_offset_events_relative_start():
+    events = [ev(0.0, KEY, char="a"), ev(0.1, x=500, y=500), ev(0.2, CLICK, x=600, y=550, button="left")]
+    assert M.first_position(events) == (500, 500)
+    out = M.offset_events(events, 100 - 500, 200 - 500)
+    assert [(e.x, e.y) for e in out[1:]] == [(100, 200), (200, 250)]
+    assert out[0] == events[0]

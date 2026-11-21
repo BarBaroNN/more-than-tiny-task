@@ -292,6 +292,48 @@ def rebase(events: Sequence[Event]) -> List[Event]:
     return [e.shifted(-t0) for e in events]
 
 
+# ------------------------------------------------- coordinate transforms
+
+POSITIONAL = (MOVE, CLICK, SCROLL)
+
+
+def first_position(events: Sequence[Event]) -> Optional[tuple]:
+    for e in events:
+        if e.kind in POSITIONAL:
+            return e.x, e.y
+    return None
+
+
+def offset_events(events: Sequence[Event], dx: int, dy: int) -> List[Event]:
+    """Move every mouse position by (dx, dy)."""
+    if not dx and not dy:
+        return list(events)
+    return [replace(e, x=e.x + dx, y=e.y + dy) if e.kind in POSITIONAL else e for e in events]
+
+
+def scale_events(events: Sequence[Event], src: Sequence[int], dst: Sequence[int]) -> List[Event]:
+    """Map mouse positions from screen rect ``src`` to ``dst``.
+
+    Rects are ``(left, top, width, height)`` in physical pixels, e.g. a macro
+    recorded on 2560x1440 replayed on 1920x1080 is scaled by 0.75 on both axes.
+    """
+    if not src or not dst or tuple(src) == tuple(dst):
+        return list(events)
+    sl, st, sw, sh = src
+    dl, dt_, dw, dh = dst
+    if sw <= 0 or sh <= 0:
+        return list(events)
+    fx, fy = dw / sw, dh / sh
+
+    def tx(x):
+        return int(round(dl + (x - sl) * fx))
+
+    def ty(y):
+        return int(round(dt_ + (y - st) * fy))
+
+    return [replace(e, x=tx(e.x), y=ty(e.y)) if e.kind in POSITIONAL else e for e in events]
+
+
 # ---------------------------------------------------------------- file io
 
 @dataclass

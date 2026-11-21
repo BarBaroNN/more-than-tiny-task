@@ -92,3 +92,24 @@ def window_rect_physical(widget):
     g = widget.frameGeometry()
     r = widget.devicePixelRatioF()
     return int(g.left() * r), int(g.top() * r), int((g.right() + 1) * r), int((g.bottom() + 1) * r)
+
+
+def primary_screen_rect():
+    """(left, top, width, height) of the primary monitor in physical pixels.
+
+    Mouse coordinates are recorded in the same physical-pixel space, so a
+    macro's coordinates can be rescaled between resolutions with this rect.
+    """
+    if IS_WINDOWS:
+        try:
+            return [0, 0, int(_user32.GetSystemMetrics(0)), int(_user32.GetSystemMetrics(1))]
+        except Exception:
+            pass
+    try:
+        from PySide6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        g = screen.geometry()
+        r = screen.devicePixelRatio()
+        return [int(g.x() * r), int(g.y() * r), int(round(g.width() * r)), int(round(g.height() * r))]
+    except Exception:
+        return None

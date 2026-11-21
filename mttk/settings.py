@@ -45,6 +45,8 @@ class Settings:
     delay_unit: str = "seconds"
     speed: float = 1.0
     release_keys_on_stop: bool = True
+    relative_start: bool = False      # start from the current cursor position
+    adapt_resolution: bool = True     # rescale mouse positions to this screen
     # mouse centring
     center_target: str = "cursor"  # 'cursor' or 'primary'
     center_duration_ms: int = 350

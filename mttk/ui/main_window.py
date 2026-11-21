@@ -37,14 +37,18 @@ class Bridge(QObject):
 
 
 class SetEventsCommand(QUndoCommand):
-    def __init__(self, win: "MainWindow", old, new, text):
+    def __init__(self, win: "MainWindow", old, new, text, old_meta=None, new_meta=None):
         super().__init__(text)
         self.win, self.old, self.new = win, list(old), list(new)
+        self.old_meta = dict(old_meta or {})
+        self.new_meta = dict(new_meta if new_meta is not None else self.old_meta)
 
     def redo(self):
+        self.win.meta = dict(self.new_meta)
         self.win._set_events(self.new)
 
     def undo(self):
+        self.win.meta = dict(self.old_meta)
         self.win._set_events(self.old)
 
 
@@ -90,6 +94,7 @@ class MainWindow(QMainWindow):
         self.settings = Settings.load()
         self.events: List[Event] = []
         self.file_path: Optional[str] = None
+        self.meta: dict = {}   # macro metadata, e.g. {"screen": [left, top, w, h]}
         self.state = IDLE
         self.clipboard = None  # (events, length)
         self.recorder = None
@@ -243,6 +248,25 @@ class MainWindow(QMainWindow):
         self.spin_speed.setMinimumWidth(90)
         prow.addWidget(labeled("Speed", self.spin_speed))
 
+        mouse_opts = QWidget()
+        mv = QVBoxLayout(mouse_opts)
+        mv.setContentsMargins(0, 0, 0, 0)
+        mv.setSpacing(4)
+        lbl = QLabel("MOUSE")
+        lbl.setObjectName("CardTitle")
+        mv.addWidget(lbl)
+        self.chk_relative = QCheckBox("Start from current cursor")
+        self.chk_relative.setChecked(s.relative_start)
+        self.chk_relative.setToolTip("Shift the whole recording so it starts where your mouse pointer is now,\n"
+                                     "instead of where it was when you recorded it.")
+        self.chk_adapt = QCheckBox("Adapt to screen resolution")
+        self.chk_adapt.setChecked(s.adapt_resolution)
+        self.chk_adapt.setToolTip("Rescale mouse positions when the macro was recorded on a different resolution\n"
+                                  "(e.g. recorded on 2560×1440, played on 1920×1080).")
+        mv.addWidget(self.chk_relative)
+        mv.addWidget(self.chk_adapt)
+        prow.addWidget(mouse_opts)
+
         prog = QWidget()
         pv = QVBoxLayout(prog)
         pv.setContentsMargins(0, 0, 0, 0)
@@ -264,6 +288,9 @@ class MainWindow(QMainWindow):
         for w in (self.spin_repeat, self.spin_delay, self.spin_speed):
             w.valueChanged.connect(self._save_playback_options)
         self.chk_infinite.toggled.connect(self._save_playback_options)
+        self.chk_relative.toggled.connect(self._save_playback_options)
+        self.chk_adapt.toggled.connect(self._save_playback_options)
+        self.chk_adapt.toggled.connect(lambda _on: self._update_screen_label())
         self.cmb_unit.currentTextChanged.connect(self._save_playback_options)
         root.addWidget(pb)
 
@@ -383,9 +410,11 @@ class MainWindow(QMainWindow):
         sb = self.statusBar()
         self.sb_events = QLabel()
         self.sb_duration = QLabel()
+        self.sb_screen = QLabel()
         self.sb_hotkeys = QLabel()
         sb.addWidget(self.sb_events)
         sb.addWidget(self.sb_duration)
+        sb.addWidget(self.sb_screen)
         sb.addPermanentWidget(self.sb_hotkeys)
         self._update_hotkey_hint()
 
@@ -477,6 +506,8 @@ class MainWindow(QMainWindow):
         s.delay_value = self.spin_delay.value()
         s.delay_unit = self.cmb_unit.currentText()
         s.speed = self.spin_speed.value()
+        s.relative_start = self.chk_relative.isChecked()
+        s.adapt_resolution = self.chk_adapt.isChecked()
         s.save()
 
     def open_settings(self):
@@ -545,13 +576,45 @@ class MainWindow(QMainWindow):
         moves = sum(1 for e in self.events if e.kind == MOVE)
         self.sb_events.setText(f"{n:,} events ({n - moves:,} actions, {moves:,} moves)")
         self.sb_duration.setText(f"Length {fmt_time(M.duration(self.events), 2)}")
+        self._update_screen_label()
         self._update_time_label()
         self._update_state_ui()
 
-    def apply_edit(self, new_events, text: str):
+    def apply_edit(self, new_events, text: str, meta: Optional[dict] = None):
         if self.state != IDLE:
             return
-        self.undo.push(SetEventsCommand(self, self.events, new_events, text))
+        self.undo.push(SetEventsCommand(self, self.events, new_events, text, self.meta, meta))
+
+    # ------------------------------------------------- screen / resolution
+    def _macro_screen(self):
+        scr = self.meta.get("screen")
+        return list(scr) if scr and len(scr) == 4 else None
+
+    def _update_screen_label(self):
+        scr = self._macro_screen()
+        if not self.events or not scr:
+            self.sb_screen.setText("")
+            return
+        cur = winutil.primary_screen_rect()
+        txt = f"Recorded at {scr[2]}×{scr[3]}"
+        if cur and list(cur) != scr:
+            txt += f"  →  this screen {cur[2]}×{cur[3]}" + ("" if self.chk_adapt.isChecked() else " (not adapting)")
+        self.sb_screen.setText(txt)
+
+    def _to_current_screen(self, events):
+        """Macro coordinates → coordinates for the screen we're playing on."""
+        if not self.chk_adapt.isChecked():
+            return list(events)
+        return M.scale_events(events, self._macro_screen(), winutil.primary_screen_rect())
+
+    def _prepare_for_playback(self, events):
+        events = self._to_current_screen(events)
+        if self.chk_relative.isChecked():
+            start = M.first_position(events)
+            if start:
+                cx, cy = winutil.cursor_pos()
+                events = M.offset_events(events, cx - start[0], cy - start[1])
+        return events
 
     def _update_title(self):
         name = os.path.basename(self.file_path) if self.file_path else "Untitled"
@@ -572,7 +635,8 @@ class MainWindow(QMainWindow):
         self.btn_record.setEnabled(self.state in (IDLE, RECORDING, COUNTDOWN))
         self.btn_play.setEnabled((idle and has) or self.state == PLAYING)
         self.btn_stop.setEnabled(not idle)
-        for w in (self.spin_repeat, self.chk_infinite, self.spin_delay, self.cmb_unit, self.spin_speed):
+        for w in (self.spin_repeat, self.chk_infinite, self.spin_delay, self.cmb_unit, self.spin_speed,
+                  self.chk_relative, self.chk_adapt):
             w.setEnabled(idle)
         if idle:
             self.spin_repeat.setEnabled(not self.chk_infinite.isChecked())
@@ -801,6 +865,10 @@ class MainWindow(QMainWindow):
 
         if mode in ("replace", "insert") and self.settings.move_cursor_before_rerecord:
             pos = M.cursor_position_at(self.events, self._rec_ctx["start"])
+            if pos and self._macro_screen():
+                mapped = M.scale_events([Event(0.0, MOVE, x=pos[0], y=pos[1])], self._macro_screen(),
+                                        winutil.primary_screen_rect())
+                pos = (mapped[0].x, mapped[0].y)
             if pos:
                 try:
                     from pynput.mouse import Controller
@@ -885,21 +953,29 @@ class MainWindow(QMainWindow):
         self.timeline.set_overlay("")
         self._restore_after_task()
         ctx = self._rec_ctx
+        current = winutil.primary_screen_rect()
+        meta = dict(self.meta)
+        if ctx["mode"] == "new" or not self.events or not self._macro_screen():
+            if clip and current:
+                meta["screen"] = list(current)
+        elif current and self._macro_screen() != list(current):
+            # a take recorded on another resolution: store it in the macro's coordinates
+            clip = M.scale_events(clip, current, self._macro_screen())
         if ctx["mode"] == "new":
             if clip:
-                self.apply_edit(clip, "Record")
+                self.apply_edit(clip, "Record", meta)
                 self.timeline.set_selection(None)
                 self.timeline.set_playhead(0.0, emit=True)
                 self.timeline.zoom_fit()
             self.lbl_status.setText(f"Recorded {len(clip)} events ({fmt_time(M.duration(clip), 2)})")
         elif ctx["mode"] == "replace":
             a, b = ctx["start"], ctx["end"]
-            self.apply_edit(M.replace_range(self.events, a, b, clip, length), "Re-record selection")
+            self.apply_edit(M.replace_range(self.events, a, b, clip, length), "Re-record selection", meta)
             self.timeline.set_selection((a, a + length))
             self.lbl_status.setText(f"Replaced {b - a:.2f}s with a new {length:.2f}s take")
         else:
             t = ctx["start"]
-            self.apply_edit(M.insert_at(self.events, t, clip, length), "Insert recording")
+            self.apply_edit(M.insert_at(self.events, t, clip, length), "Insert recording", meta)
             self.timeline.set_selection((t, t + length))
             self.lbl_status.setText(f"Inserted {length:.2f}s at {fmt_time(t, 2)}")
         self._update_state_ui()
@@ -939,6 +1015,7 @@ class MainWindow(QMainWindow):
         self._play_duration = max(M.duration(events), 1e-6)
         self._play_runs = repeats
         b = self.bridge
+        events = self._prepare_for_playback(events)
         self.player = Player(events, repeats=repeats, delay=delay, speed=self.spin_speed.value(),
                              release_on_stop=s.release_keys_on_stop,
                              on_progress=b.progress.emit, on_wait=b.waiting.emit, on_finished=b.finished.emit)
@@ -1049,6 +1126,7 @@ class MainWindow(QMainWindow):
         if self.state != IDLE or not self._confirm_discard():
             return
         self.file_path = None
+        self.meta = {}
         self.undo.clear()
         self._set_events([])
         self.timeline.set_selection(None)
@@ -1072,6 +1150,7 @@ class MainWindow(QMainWindow):
         self.settings.last_dir = os.path.dirname(path)
         self.settings.save()
         self.undo.clear()
+        self.meta = dict(macro.meta or {})
         self._set_events(macro.events)
         self.timeline.set_selection(None)
         self.timeline.set_playhead(0.0, emit=True)
@@ -1082,7 +1161,7 @@ class MainWindow(QMainWindow):
         if not self.file_path:
             return self.save_as()
         try:
-            Macro(self.events, meta={"app_version": __version__}).save(self.file_path)
+            Macro(self.events, meta={**self.meta, "app_version": __version__}).save(self.file_path)
         except Exception as exc:
             QMessageBox.critical(self, APP_NAME, f"Could not save:\n{exc}")
             return False
