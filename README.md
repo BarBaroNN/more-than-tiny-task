@@ -28,6 +28,8 @@ More Than Tiny Task keeps the same **record → play** simplicity and adds:
 | **Timeline editor** (cut, copy, paste, move, delete) | — | ✅ |
 | **Re-record just one part** of a macro | — | ✅ |
 | **Glide the mouse to the screen centre** with a hotkey | — | ✅ |
+| **Play from wherever your cursor is now** | — | ✅ |
+| **Works across resolutions** (record on 1440p, play on 1080p) | — | ✅ |
 | Custom hotkeys, stay on top, compact mode, tray | — | ✅ |
 | Undo / redo | — | ✅ |
 
@@ -53,6 +55,15 @@ All hotkeys work while other windows are focused and can be changed in **Setting
 2. Set **Repeat** (or tick *Unlimited*), an optional **Delay between runs**, and the **Speed**.
 3. Press **F9**. Press **Esc** at any time to stop.
 4. **Ctrl+S** saves the macro as a `.mttk` file. Drag a file onto the window to open it.
+
+### Mouse options
+
+Two switches next to *Speed* control where the mouse goes during playback:
+
+- **Start from current cursor:** the whole recording is shifted so it starts where your pointer is right now, instead of where it was when you recorded. Every repeat starts from that same spot. Useful for things that aren't always in the same place on screen.
+- **Adapt to screen resolution** (on by default): each macro remembers the resolution it was recorded on. If you play it on a different one (for example recorded on 2560×1440, played on 1920×1080), every mouse position is rescaled so it lands on the same spot of the screen. The status bar shows both resolutions. Parts you re-record on another screen are converted automatically too.
+
+> Rescaling works best for apps and games that fill the screen and scale their UI with the resolution. If the aspect ratio changes (16:9 → 16:10), positions are stretched to match.
 
 ### Fix one part without redoing everything
 
@@ -81,7 +92,7 @@ Under **Settings** you'll also find window opacity, minimize to tray, auto-hide 
 ## Tips
 
 - **Admin apps / some games:** Windows blocks input from normal programs into apps running as Administrator. Right-click the exe → **Run as administrator** if playback doesn't reach them.
-- **Display scaling:** record and play on the same monitor setup and scaling, because mouse positions are absolute.
+- **Multiple monitors:** resolution adapting uses your *primary* monitor's size. Record and play with the same monitor arrangement for best results.
 - **Huge recordings:** *More ▾ → Simplify mouse moves* thins out mouse movement without touching clicks or keys.
 
 ## Run from source
