@@ -108,3 +108,38 @@ def test_offset_events_relative_start():
     out = M.offset_events(events, 100 - 500, 200 - 500)
     assert [(e.x, e.y) for e in out[1:]] == [(100, 200), (200, 250)]
     assert out[0] == events[0]
+
+
+def test_resume_from_starts_at_playhead_with_cursor_position():
+    events = [ev(0.0, x=10, y=10), ev(1.0, x=20, y=20), ev(2.0, KEY, key_name="a", pressed=True),
+              ev(2.5, KEY, key_name="a", pressed=False), ev(3.0, x=30, y=30)]
+    out = M.resume_from(events, 1.5)
+    # cursor placed where it was at 1.5s, then the tail re-based to start at 0
+    assert out[0].kind == MOVE and (out[0].x, out[0].y) == (20, 20) and out[0].t == 0.0
+    assert ts(out[1:]) == [0.5, 1.0, 1.5]
+
+
+def test_resume_from_repress_held_keys_and_buttons():
+    events = [ev(0.0, CLICK, x=5, y=5, button="left", pressed=True), ev(0.5, x=8, y=8),
+              ev(1.0, KEY, key_name="shift", pressed=True), ev(1.5, KEY, key_name="a", pressed=True),
+              ev(1.6, KEY, key_name="a", pressed=False),
+              ev(3.0, KEY, key_name="shift", pressed=False),
+              ev(4.0, CLICK, x=9, y=9, button="left", pressed=False)]
+    out = M.resume_from(events, 2.0)
+    head = [e for e in out if e.t == 0.0]
+    assert head[0].kind == MOVE and (head[0].x, head[0].y) == (8, 8)
+    # left button (pressed at the resume position) and shift are still down; "a" is not
+    assert any(e.kind == CLICK and e.pressed and (e.x, e.y) == (8, 8) for e in head)
+    assert any(e.kind == KEY and e.key_name == "shift" and e.pressed for e in head)
+    assert not any(e.kind == KEY and e.key_name == "a" for e in head)
+    assert ts(out[len(head):]) == [1.0, 2.0]
+
+
+def test_resume_from_event_exactly_at_t_is_kept():
+    out = M.resume_from(BASE, 2.0)
+    # move to the position at 1.0 (last before 2.0), then events 2, 3, 4
+    assert ts(out) == [0.0, 0.0, 1.0, 2.0]
+
+
+def test_resume_from_zero_is_whole_macro():
+    assert ts(M.resume_from(BASE, 0.0)) == ts(BASE)

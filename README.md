@@ -45,7 +45,7 @@ More Than Tiny Task keeps the same **record → play** simplicity and adds:
 | Key | What it does |
 |-----|--------------|
 | **F8**  | Start / stop recording |
-| **F9**  | Start / stop playback (plays only the selected part if you've selected one) |
+| **F9**  | Start / stop playback (continues from the playhead, or plays only the selected part if you've selected one) |
 | **Esc** | Stop playback |
 | **F10** | Glide the mouse to the centre of the screen. Works while recording, and the glide is recorded |
 
@@ -57,6 +57,7 @@ F8, F9 and F10 are never recorded and never reach the app you're using, so F10 w
 2. Set **Repeat** (or tick *Unlimited*), an optional **Delay between runs**, and the **Speed**.
 3. Press **F9**. Press **Esc** at any time to stop.
    If a part of the timeline is selected, **F9 plays just that part**, with the same repeat / delay / speed settings. Click an empty spot on the timeline to clear the selection.
+   Otherwise **F9 continues from the playhead** (the red line): stop with Esc and press F9 again to pick up where it stopped, or click anywhere on the timeline to start from there. Keys and mouse buttons that were held down at that point are pressed again. Further repeats play the whole macro. Click *play from the start* under the progress bar to go back to the beginning.
 4. **Ctrl+S** saves the macro as a `.mttk` file. Drag a file onto the window to open it.
 
 ### Mouse options
@@ -73,8 +74,8 @@ Two switches next to *Speed* control where the mouse goes during playback:
 <img src="docs/preview-editor.png" alt="Timeline editor with a selected range" width="900">
 
 - **Drag** across the timeline to select the part you want to change. Drag the blue edges to fine-tune it.
-- Press **● Re-record selection** (Ctrl+R) and do that part again. Only the selection is replaced and everything after it shifts to fit. The cursor is first moved to where it was at that moment, so the new take joins up with the rest.
-- **● Insert recording** (Ctrl+I) adds a new take at the red playhead.
+- Press **● Re-record selection** (Ctrl+R). Nothing is recorded yet: get ready in the app you're recording, then press **F8** to start (Esc or Stop cancels). Do that part again and press **F8** to finish. Only the selection is replaced and everything after it shifts to fit. When you press F8 the cursor is first moved to where it was at that moment, so the new take joins up with the rest.
+- **● Insert recording** (Ctrl+I) adds a new take at the red playhead. It also waits for **F8** before it starts.
 - **Cut / Copy / Paste / Delete** work on the selection. **More ▾** has *insert pause*, *change speed of a section*, *trim* and *remove / simplify mouse moves*.
 - **Click** a key or click block to select it and **drag** it to move it in time. Double-click to edit exact times, delays and coordinates in the event table.
 - **▶ Preview selection** plays only the selected part. **Ctrl+Z / Ctrl+Y** undo and redo everything.

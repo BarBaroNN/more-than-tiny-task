@@ -26,6 +26,7 @@ from .settings_dialog import SettingsDialog
 from .timeline import Timeline, fmt_time
 
 IDLE, COUNTDOWN, RECORDING, PLAYING = "idle", "countdown", "recording", "playing"
+ARMED = "armed"  # re-record / insert chosen, waiting for the record hotkey to start
 
 
 class Bridge(QObject):
@@ -102,6 +103,7 @@ class MainWindow(QMainWindow):
         self._rec_ctx = {}
         self._countdown_left = 0
         self._play_offset = 0.0
+        self._resume_at = 0.0
         self._play_duration = 0.0
         self._was_visible = True
 
@@ -276,6 +278,8 @@ class MainWindow(QMainWindow):
         lbl.setObjectName("CardTitle")
         self.lbl_run = QLabel("")
         self.lbl_run.setObjectName("Dim")
+        self.lbl_run.setTextFormat(Qt.RichText)
+        self.lbl_run.linkActivated.connect(self._playhead_to_start)
         ptop.addWidget(lbl)
         ptop.addStretch(1)
         ptop.addWidget(self.lbl_run)
@@ -326,10 +330,10 @@ class MainWindow(QMainWindow):
         ebtn("paste", "Paste", "Paste at playhead (Ctrl+V)", self.paste)
         ebtn("delete", "Delete", "Delete selection or selected events (Del)", self.delete)
         erow.addSpacing(6)
-        b = ebtn("rerecord", "● Re-record selection", "Record a new take that replaces the selected part (Ctrl+R)",
+        b = ebtn("rerecord", "● Re-record selection", "Get ready to record a new take that replaces the selected part; recording starts when you press the record key (Ctrl+R)",
                  self.rerecord_selection)
         b.setStyleSheet(f"QToolButton {{ color: {theme.RED}; }}")
-        ebtn("insertrec", "● Insert recording", "Record a new take and insert it at the playhead (Ctrl+I)",
+        ebtn("insertrec", "● Insert recording", "Get ready to record a new take inserted at the playhead; recording starts when you press the record key (Ctrl+I)",
              self.insert_recording)
         erow.addSpacing(6)
         more = QMenu(self)
@@ -565,6 +569,8 @@ class MainWindow(QMainWindow):
                 self.stop_recording()
             elif self.state == COUNTDOWN:
                 self._cancel_countdown()
+            elif self.state == ARMED:
+                self._launch_recording()
             elif self.state == IDLE:
                 self.start_recording("new")
         elif action == "play":
@@ -573,9 +579,12 @@ class MainWindow(QMainWindow):
             elif self.state == IDLE:
                 self.play()
         elif action == "stop":
-            # stops playback only; recording is stopped with the record key
+            # stops playback (or cancels an armed re-record); recording is
+            # stopped with the record key
             if self.state == PLAYING:
                 self.stop_playback()
+            elif self.state == ARMED:
+                self._cancel_countdown()
         elif action == "center":
             self.center_mouse()
 
@@ -619,14 +628,22 @@ class MainWindow(QMainWindow):
             return list(events)
         return M.scale_events(events, self._macro_screen(), winutil.primary_screen_rect())
 
-    def _prepare_for_playback(self, events):
+    def _prepare_for_playback(self, events, first_run=None):
+        """Map to this screen and, for "start from current cursor", shift so the
+        clip starts at the pointer. ``first_run`` (resuming mid-macro) gets the
+        same shift as ``events`` so later full runs line up with it."""
         events = self._to_current_screen(events)
+        if first_run is not None:
+            first_run = self._to_current_screen(first_run)
         if self.chk_relative.isChecked():
-            start = M.first_position(events)
+            start = M.first_position(first_run if first_run is not None else events)
             if start:
                 cx, cy = winutil.cursor_pos()
-                events = M.offset_events(events, cx - start[0], cy - start[1])
-        return events
+                dx, dy = cx - start[0], cy - start[1]
+                events = M.offset_events(events, dx, dy)
+                if first_run is not None:
+                    first_run = M.offset_events(first_run, dx, dy)
+        return events, first_run
 
     def _update_title(self):
         name = os.path.basename(self.file_path) if self.file_path else "Untitled"
@@ -642,9 +659,9 @@ class MainWindow(QMainWindow):
         idle = self.state == IDLE
         has = bool(self.events)
         sel = self.timeline.selection is not None
-        self.btn_record.setChecked(self.state in (RECORDING, COUNTDOWN))
+        self.btn_record.setChecked(self.state in (RECORDING, COUNTDOWN, ARMED))
         self.btn_play.setChecked(self.state == PLAYING)
-        self.btn_record.setEnabled(self.state in (IDLE, RECORDING, COUNTDOWN))
+        self.btn_record.setEnabled(self.state in (IDLE, RECORDING, COUNTDOWN, ARMED))
         self.btn_play.setEnabled((idle and has) or self.state == PLAYING)
         self.btn_stop.setEnabled(not idle)
         for w in (self.spin_repeat, self.chk_infinite, self.spin_delay, self.cmb_unit, self.spin_speed,
@@ -663,21 +680,42 @@ class MainWindow(QMainWindow):
         b["insertrec"].setEnabled(idle)
         b["playsel"].setEnabled(idle and sel)
         if idle:
-            if sel:
-                a, z = self.timeline.selection
-                self.lbl_run.setText(f"▶ Play uses selection {fmt_time(a, 2)} → {fmt_time(z, 2)}")
-                self.btn_play.setToolTip("Play the selected part (click an empty spot on the timeline to clear)")
-            else:
-                if self.lbl_run.text().startswith("▶"):
-                    self.lbl_run.setText("")
-                self.btn_play.setToolTip("Play the macro")
+            self._update_play_hint()
         self.timeline.read_only = not idle
         self.table.setEnabled(idle)
         self._update_title()
 
+    def _resume_point(self) -> float:
+        """Where Play starts when nothing is selected: the playhead, unless it's
+        at the very start or at / past the end (then the macro plays from 0)."""
+        t = self.timeline.playhead
+        return t if self.events and 0.0 < t < M.duration(self.events) else 0.0
+
+    def _update_play_hint(self):
+        """The "▶ ..." line under the transport: what Play will do right now."""
+        if self.state != IDLE:
+            return
+        sel = self.timeline.selection
+        if sel:
+            a, z = sel
+            self.lbl_run.setText(f"▶ Play uses selection {fmt_time(a, 2)} → {fmt_time(z, 2)}")
+            self.btn_play.setToolTip("Play the selected part (click an empty spot on the timeline to clear)")
+        elif self._resume_point() > 0:
+            self.lbl_run.setText(f"▶ Play continues from {fmt_time(self._resume_point(), 2)}  ·  "
+                                 f"<a href='start' style='color:{theme.ACCENT}'>play from the start</a>")
+            self.btn_play.setToolTip("Play from the playhead (the red line)")
+        else:
+            if self.lbl_run.text().startswith("▶"):
+                self.lbl_run.setText("")
+            self.btn_play.setToolTip("Play the macro")
+
+    def _playhead_to_start(self, *_):
+        self.timeline.set_playhead(0.0, follow=True, emit=True)
+
     # --------------------------------------------------------- selections
     def _on_playhead(self, t):
         self._update_time_label(t)
+        self._update_play_hint()
 
     def _on_selection(self, sel):
         if sel:
@@ -852,6 +890,8 @@ class MainWindow(QMainWindow):
             self.stop_recording(via_ui=True)
         elif self.state == COUNTDOWN:
             self._cancel_countdown()
+        elif self.state == ARMED:
+            self._launch_recording()
         elif self.state == IDLE:
             self.start_recording("new")
         self._update_state_ui()
@@ -884,6 +924,28 @@ class MainWindow(QMainWindow):
         else:
             self._rec_ctx = {"mode": "new", "start": 0.0}
 
+        if mode in ("replace", "insert") and self.hotkeys:
+            # Clicking Re-record / Insert happens in our window, so don't start
+            # yet: wait until the user is set up and presses the record key.
+            self.state = ARMED
+            self._show_armed()
+            self._update_state_ui()
+            return
+        self._launch_recording()
+
+    def _show_armed(self):
+        what = "Re-record" if self._rec_ctx["mode"] == "replace" else "Insert recording"
+        rec, stop = self._hk("record"), self._hk("stop")
+        self.lbl_status.setText(f"{what} ready  ·  press {rec} to start  ·  {stop} or Stop to cancel")
+        self.timeline.set_overlay(f"● {what} ready\nPress {rec} to start recording  ·  {stop} to cancel")
+        if self.settings.show_osd:
+            self.osd.show_message(f"{what}: press {rec} to start   ·   {stop} to cancel", theme.YELLOW)
+
+    def _launch_recording(self):
+        """Start the recording set up in ``_rec_ctx`` (after a countdown, if set)."""
+        if self.state not in (IDLE, ARMED):
+            return
+        mode = self._rec_ctx["mode"]
         if mode in ("replace", "insert") and self.settings.move_cursor_before_rerecord:
             pos = M.cursor_position_at(self.events, self._rec_ctx["start"])
             if pos and self._macro_screen():
@@ -1018,14 +1080,16 @@ class MainWindow(QMainWindow):
         self._update_state_ui()
 
     def play(self):
-        """Play button / play hotkey: the selected range if there is one, else everything."""
+        """Play button / play hotkey: the selected range if there is one, otherwise
+        the macro from the playhead (the first run continues from there, any
+        further runs play the whole macro)."""
         sel = self._sel()
         if sel:
             i, j = M.index_range(self.events, *sel)
             if j > i:
                 self.start_playback(events=M.slice_range(self.events, *sel), offset=sel[0])
                 return
-        self.start_playback()
+        self.start_playback(resume_at=self._resume_point())
 
     def play_selection(self):
         sel = self._sel()
@@ -1033,7 +1097,9 @@ class MainWindow(QMainWindow):
             self.start_playback(events=M.slice_range(self.events, *sel), offset=sel[0], repeats=1, delay=0.0,
                                 preview=True)
 
-    def start_playback(self, events=None, offset: float = 0.0, repeats=None, delay=None, preview=False):
+    def start_playback(self, events=None, offset: float = 0.0, repeats=None, delay=None, preview=False,
+                       resume_at: float = 0.0):
+        """``resume_at`` > 0 makes the first run start that far into ``events``."""
         if self.state != IDLE:
             return
         events = self.events if events is None else events
@@ -1053,11 +1119,14 @@ class MainWindow(QMainWindow):
         self._play_offset = offset
         self._play_duration = max(M.duration(events), 1e-6)
         self._play_runs = repeats
+        self._resume_at = resume_at if 0.0 < resume_at < M.duration(events) else 0.0
+        first_run = M.resume_from(events, self._resume_at) if self._resume_at else None
         b = self.bridge
-        events = self._prepare_for_playback(events)
+        events, first_run = self._prepare_for_playback(events, first_run)
         self.player = Player(events, repeats=repeats, delay=delay, speed=self.spin_speed.value(),
                              release_on_stop=s.release_keys_on_stop,
-                             on_progress=b.progress.emit, on_wait=b.waiting.emit, on_finished=b.finished.emit)
+                             on_progress=b.progress.emit, on_wait=b.waiting.emit, on_finished=b.finished.emit,
+                             first_run=first_run)
         self.state = PLAYING
         self._play_started = time.time()
         self._last_run = 0
@@ -1073,6 +1142,8 @@ class MainWindow(QMainWindow):
         if self.state != PLAYING:
             return
         self._last_run = run
+        if run == 1:
+            t += self._resume_at  # the first run started part-way in
         abs_t = self._play_offset + t
         self.timeline.set_playhead(abs_t, follow=True)
         self._update_time_label(abs_t)
@@ -1112,7 +1183,7 @@ class MainWindow(QMainWindow):
             self.stop_playback()
         elif self.state == RECORDING:
             self.stop_recording(via_ui=via_ui)
-        elif self.state == COUNTDOWN:
+        elif self.state in (COUNTDOWN, ARMED):
             self._cancel_countdown()
 
     # =========================================================== centring

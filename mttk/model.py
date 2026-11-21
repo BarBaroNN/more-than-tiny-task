@@ -244,6 +244,41 @@ def cursor_position_at(events: Sequence[Event], t: float) -> Optional[tuple]:
     return None
 
 
+def resume_from(events: Sequence[Event], t: float) -> List[Event]:
+    """Events from ``t`` to the end, re-based to start at 0, ready to play.
+
+    Playing only the tail would lose the state the macro is in at ``t``, so
+    the result starts with a move to where the cursor was at that moment and
+    re-presses any keys / mouse buttons still held down at ``t`` (pressed
+    before it, released after it). Events exactly at ``t`` belong to the tail.
+    """
+    t = max(0.0, t)
+    i = bisect.bisect_left(times(events), t)
+    pos = None
+    held = {}
+    for e in events[:i]:
+        if e.kind in POSITIONAL:
+            pos = (e.x, e.y)
+        if e.kind == KEY:
+            if e.pressed:
+                held[("k", e.key_id)] = e
+            else:
+                held.pop(("k", e.key_id), None)
+        elif e.kind == CLICK:
+            if e.pressed:
+                held[("b", e.button)] = e
+            else:
+                held.pop(("b", e.button), None)
+    head: List[Event] = []
+    if pos:
+        head.append(Event(0.0, MOVE, x=pos[0], y=pos[1]))
+    for e in held.values():
+        if e.kind == CLICK and pos:
+            e = replace(e, x=pos[0], y=pos[1])
+        head.append(e.at(0.0))
+    return head + [e.shifted(-t) for e in events[i:]]
+
+
 def sanitize_recording(events: Sequence[Event]) -> List[Event]:
     """Clean up the edges of a fresh recording.
 

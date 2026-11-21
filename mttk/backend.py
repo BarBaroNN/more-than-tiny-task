@@ -249,6 +249,20 @@ class Recorder:
 
 # ------------------------------------------------------------------- player
 
+_EPS = 1e-6
+
+
+def stop_position(elapsed: float, done_t: Optional[float], next_t: float) -> float:
+    """Where in the clip playback stopped: the real elapsed time, kept strictly
+    after the last played event (``done_t``) and strictly before the next one,
+    so resuming from it neither repeats nor skips an event."""
+    pos = elapsed
+    if done_t is not None:
+        pos = max(pos, done_t + _EPS)
+    pos = min(pos, next_t - _EPS)
+    return max(0.0, pos)
+
+
 class Player:
     """Plays a list of events on a background thread.
 
@@ -256,12 +270,19 @@ class Player:
       on_progress(run_index, total_runs, t_seconds)
       on_wait(seconds_remaining, next_run_index)
       on_finished(completed: bool)
+
+    ``first_run`` (optional) is played instead of ``events`` on the first run
+    only, e.g. to continue from the middle and then loop the whole macro.
+    When stopped mid-run, a last ``on_progress`` reports the exact stop
+    position: after every event already played and before the next one.
     """
 
     def __init__(self, events: Sequence[Event], repeats: int = 1, delay: float = 0.0,
                  speed: float = 1.0, release_on_stop: bool = True,
-                 on_progress=None, on_wait=None, on_finished=None):
+                 on_progress=None, on_wait=None, on_finished=None,
+                 first_run: Optional[Sequence[Event]] = None):
         self.events = list(events)
+        self.first_run = list(first_run) if first_run is not None else None
         self.repeats = max(0, int(repeats))  # 0 = forever
         self.delay = max(0.0, delay)
         self.speed = max(0.05, speed)
@@ -320,23 +341,28 @@ class Player:
             self.on_finished(completed)
 
     def _play_once(self, run: int) -> bool:
+        events = self.first_run if (run == 1 and self.first_run is not None) else self.events
         start = time.perf_counter()
         last_report = 0.0
         self.on_progress(run, self.repeats, 0.0)
-        for e in self.events:
+        done_t = None
+        for e in events:
             target = start + e.t / self.speed
             if not self._wait_until(target):
+                elapsed = (time.perf_counter() - start) * self.speed
+                self.on_progress(run, self.repeats, stop_position(elapsed, done_t, e.t))
                 return False
             try:
                 self._do(e)
             except Exception:
                 pass
+            done_t = e.t
             now = time.perf_counter()
             if now - last_report > 0.04:
                 last_report = now
                 self.on_progress(run, self.repeats, e.t)
-        if self.events:
-            self.on_progress(run, self.repeats, self.events[-1].t)
+        if events:
+            self.on_progress(run, self.repeats, events[-1].t)
         return not self._stop.is_set()
 
     def _delay_countdown(self, next_run: int) -> bool:
