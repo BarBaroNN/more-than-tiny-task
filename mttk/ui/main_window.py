@@ -968,8 +968,8 @@ class MainWindow(QMainWindow):
                 pos = (mapped[0].x, mapped[0].y)
             if pos:
                 try:
-                    from pynput.mouse import Controller
-                    Controller().position = pos
+                    from ..backend import set_mouse_position
+                    set_mouse_position(pos[0], pos[1], self.settings.mouse_move_mode)
                 except Exception:
                     pass
 
@@ -1140,7 +1140,7 @@ class MainWindow(QMainWindow):
         self.player = Player(events, repeats=repeats, delay=delay, speed=self.spin_speed.value(),
                              release_on_stop=s.release_keys_on_stop,
                              on_progress=b.progress.emit, on_wait=b.waiting.emit, on_finished=b.finished.emit,
-                             first_run=first_run)
+                             first_run=first_run, mouse_mode=s.mouse_move_mode)
         self.state = PLAYING
         self._play_started = time.time()
         self._last_run = 0
@@ -1210,7 +1210,8 @@ class MainWindow(QMainWindow):
         s = self.settings
         rec = self.recorder if self.state == RECORDING else None
         animate_mouse_to_center(s.center_target, s.center_duration_ms, s.center_easing,
-                                on_step=rec.add_synthetic_move if rec else None)
+                                on_step=rec.add_synthetic_move if rec else None,
+                                mouse_mode=s.mouse_move_mode)
 
     # ================================================== window behaviour
     def _hide_for_task(self):

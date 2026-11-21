@@ -22,6 +22,17 @@ def _injected(args) -> bool:
     return bool(args) and args[-1] is True
 
 
+def set_mouse_position(x: int, y: int, mode: str = winutil.MOUSE_RELATIVE, controller=None) -> None:
+    """Move the pointer with a real mouse input event (Windows), so programs
+    that read mouse input see the movement; elsewhere just place it."""
+    if winutil.move_mouse(x, y, mode):
+        return
+    if controller is None:
+        from pynput.mouse import Controller
+        controller = Controller()
+    controller.position = (int(x), int(y))
+
+
 # ------------------------------------------------------------------ hotkeys
 
 class HotkeyManager:
@@ -311,8 +322,10 @@ class Player:
     def __init__(self, events: Sequence[Event], repeats: int = 1, delay: float = 0.0,
                  speed: float = 1.0, release_on_stop: bool = True,
                  on_progress=None, on_wait=None, on_finished=None,
-                 first_run: Optional[Sequence[Event]] = None):
+                 first_run: Optional[Sequence[Event]] = None,
+                 mouse_mode: str = winutil.MOUSE_RELATIVE):
         self.events = list(events)
+        self.mouse_mode = mouse_mode
         self.first_run = list(first_run) if first_run is not None else None
         self.repeats = max(0, int(repeats))  # 0 = forever
         self.delay = max(0.0, delay)
@@ -410,9 +423,9 @@ class Player:
     def _do(self, e: Event) -> None:
         from pynput import mouse
         if e.kind == MOVE:
-            self._mouse.position = (e.x, e.y)
+            set_mouse_position(e.x, e.y, self.mouse_mode, self._mouse)
         elif e.kind == CLICK:
-            self._mouse.position = (e.x, e.y)
+            set_mouse_position(e.x, e.y, self.mouse_mode, self._mouse)
             button = getattr(mouse.Button, e.button, mouse.Button.left)
             if e.pressed:
                 self._mouse.press(button)
@@ -421,7 +434,7 @@ class Player:
                 self._mouse.release(button)
                 self._held_buttons.discard(button)
         elif e.kind == SCROLL:
-            self._mouse.position = (e.x, e.y)
+            set_mouse_position(e.x, e.y, self.mouse_mode, self._mouse)
             self._mouse.scroll(e.dx, e.dy)
         elif e.kind == KEY:
             params = K.win_key_params(e, winutil.vk_to_scan, winutil.char_to_vk) if self.win_keys else None
@@ -469,7 +482,8 @@ EASINGS = {
 
 def animate_mouse_to_center(target: str = "cursor", duration_ms: int = 350,
                             easing: str = "Smooth (ease in-out)",
-                            on_step: Optional[Callable[[int, int], None]] = None) -> threading.Thread:
+                            on_step: Optional[Callable[[int, int], None]] = None,
+                            mouse_mode: str = winutil.MOUSE_RELATIVE) -> threading.Thread:
     """Glide the cursor to the screen centre on a background thread."""
 
     def run():
@@ -481,7 +495,7 @@ def animate_mouse_to_center(target: str = "cursor", duration_ms: int = 350,
         dur = max(0.0, duration_ms / 1000.0)
         dist = math.hypot(x1 - x0, y1 - y0)
         if ease is None or dur <= 0 or dist < 2:
-            m.position = (x1, y1)
+            set_mouse_position(x1, y1, mouse_mode, m)
             if on_step:
                 on_step(x1, y1)
             return
@@ -492,7 +506,7 @@ def animate_mouse_to_center(target: str = "cursor", duration_ms: int = 350,
                 k = ease(p)
                 x = round(x0 + (x1 - x0) * k)
                 y = round(y0 + (y1 - y0) * k)
-                m.position = (x, y)
+                set_mouse_position(x, y, mouse_mode, m)
                 if on_step:
                     on_step(x, y)
                 if p >= 1.0:

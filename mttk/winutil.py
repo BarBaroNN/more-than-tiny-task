@@ -149,3 +149,60 @@ def char_to_vk(char: str) -> int:
         return 0
     res = int(_user32.VkKeyScanW(char))
     return 0 if res == -1 or (res & 0xFF) == 0xFF else res & 0xFF
+
+
+# ------------------------------------------------------------ mouse movement
+# SetCursorPos alone only *places* the pointer: no mouse input event is
+# generated, so programs that read the mouse as input (raw input / DirectInput,
+# e.g. games with selection wheels, camera or drag controls) see no movement.
+# Like TinyTask, a real mouse_event move is sent first and SetCursorPos then
+# puts the pointer on the exact pixel.
+
+MOUSEEVENTF_MOVE = 0x0001
+MOUSEEVENTF_VIRTUALDESK = 0x4000
+MOUSEEVENTF_ABSOLUTE = 0x8000
+
+MOUSE_RELATIVE = "relative"   # like a real mouse: movement deltas
+MOUSE_ABSOLUTE = "absolute"   # like TinyTask: absolute screen position
+MOUSE_SET_ONLY = "set"        # only SetCursorPos (no input event)
+
+if IS_WINDOWS:
+    _user32.mouse_event.argtypes = [wintypes.DWORD, ctypes.c_long, ctypes.c_long, wintypes.DWORD, ctypes.c_size_t]
+    _user32.mouse_event.restype = None
+    _user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+    _user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+    _user32.GetSystemMetrics.restype = ctypes.c_int
+
+
+def virtual_screen_rect():
+    """(left, top, width, height) of the whole desktop across all monitors."""
+    if not IS_WINDOWS:
+        return 0, 0, 0, 0
+    gsm = _user32.GetSystemMetrics
+    return gsm(76), gsm(77), gsm(78), gsm(79)  # SM_X/Y/CX/CYVIRTUALSCREEN
+
+
+def normalize_absolute(x: int, y: int, vrect) -> tuple:
+    """Pixel position -> 0..65535 coordinates over the virtual desktop
+    (what MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK expects)."""
+    left, top, w, h = vrect
+    nx = round((x - left) * 65535 / max(1, w - 1))
+    ny = round((y - top) * 65535 / max(1, h - 1))
+    return min(65535, max(0, nx)), min(65535, max(0, ny))
+
+
+def move_mouse(x: int, y: int, mode: str = MOUSE_RELATIVE) -> bool:
+    """Move the pointer to (x, y) with a real mouse input event, then snap it
+    to the exact pixel. False if not on Windows (caller falls back)."""
+    if not IS_WINDOWS:
+        return False
+    x, y = int(x), int(y)
+    if mode == MOUSE_RELATIVE:
+        cx, cy = cursor_pos()
+        if x != cx or y != cy:
+            _user32.mouse_event(MOUSEEVENTF_MOVE, x - cx, y - cy, 0, 0)
+    elif mode == MOUSE_ABSOLUTE:
+        nx, ny = normalize_absolute(x, y, virtual_screen_rect())
+        _user32.mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny, 0, 0)
+    _user32.SetCursorPos(x, y)
+    return True

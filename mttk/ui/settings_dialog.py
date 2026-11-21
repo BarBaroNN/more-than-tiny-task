@@ -160,6 +160,19 @@ class SettingsDialog(QDialog):
         self.release = QCheckBox("Release any held keys / mouse buttons when playback stops")
         self.release.setChecked(self.s.release_keys_on_stop)
         f.addRow("Safety", self.release)
+        self.mouse_mode = QComboBox()
+        self.mouse_mode.addItem("Like a real mouse (movement)", "relative")
+        self.mouse_mode.addItem("Like TinyTask (screen position)", "absolute")
+        self.mouse_mode.addItem("Only place the pointer (old)", "set")
+        i = self.mouse_mode.findData(self.s.mouse_move_mode)
+        self.mouse_mode.setCurrentIndex(i if i >= 0 else 0)
+        self.mouse_mode.setToolTip(
+            "How mouse movement is sent during playback. Every mode ends with the pointer on the recorded pixel.\n"
+            "• Like a real mouse: sends movement, which games that read the mouse directly (selection wheels,\n"
+            "  camera, drag) respond to.\n"
+            "• Like TinyTask: sends an absolute screen position, exactly as TinyTask does.\n"
+            "• Only place the pointer: no mouse input at all; some programs ignore it.")
+        f.addRow("Mouse movement", self.mouse_mode)
         f.addRow(QLabel("Repeat count, delay between runs and speed are set on the main window."))
         tabs.addTab(w, "Playback")
 
@@ -240,6 +253,7 @@ class SettingsDialog(QDialog):
         s.countdown_s = self.countdown.value()
         s.move_cursor_before_rerecord = self.move_before.isChecked()
         s.release_keys_on_stop = self.release.isChecked()
+        s.mouse_move_mode = self.mouse_mode.currentData()
         s.center_target = self.center_target.currentData()
         s.center_duration_ms = self.center_ms.value()
         s.center_easing = self.easing.currentText()

@@ -47,6 +47,7 @@ class Settings:
     release_keys_on_stop: bool = True
     relative_start: bool = False      # start from the current cursor position
     adapt_resolution: bool = True     # rescale mouse positions to this screen
+    mouse_move_mode: str = "relative"  # 'relative' (like a mouse), 'absolute' (TinyTask) or 'set'
     # mouse centring
     center_target: str = "cursor"  # 'cursor' or 'primary'
     center_duration_ms: int = 350
