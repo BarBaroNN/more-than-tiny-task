@@ -502,7 +502,7 @@ class Timeline(QWidget):
         y0, h = self._track(kind)
         xa = self.t_to_x(b.t0)
         xb = self.t_to_x(b.t1)
-        width = max(6.0, xb - xa)
+        width = max(12.0 if kind == KEY else 6.0, xb - xa)
         if kind == KEY:
             lane_h = 16
             return QRectF(xa, y0 + 5 + b.lane * (lane_h + 2), width, lane_h)
@@ -528,9 +528,13 @@ class Timeline(QWidget):
             p.setBrush(QBrush(grad))
             p.setPen(QPen(QColor("white"), 1.5) if selected else QPen(color.darker(140), 1))
             p.drawRoundedRect(r, 4, 4)
-            if r.width() > fm.horizontalAdvance(b.label) + 8:
+            adv = fm.horizontalAdvance(b.label)
+            if r.width() > adv + 8:
                 p.setPen(QColor("#0d0f13"))
                 p.drawText(r.adjusted(5, 0, -3, 0), Qt.AlignVCenter | Qt.AlignLeft, b.label)
+            elif len(b.label) <= 2 and r.width() >= adv + 2:
+                p.setPen(QColor("#0d0f13"))
+                p.drawText(r, Qt.AlignCenter, b.label)
 
     def _paint_scrolls(self, p, t_a, t_b):
         y0, h = self._track(SCROLL)

@@ -1,10 +1,14 @@
-name: Build Windows app
+name: Build & Release
 
 on:
   push:
     branches: ["**"]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -22,7 +26,30 @@ jobs:
         run: python -m pytest -q tests
       - name: Build exe
         run: pyinstaller --noconfirm --clean MoreThanTinyTask.spec
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash dist/MoreThanTinyTask.exe -Algorithm SHA256).Hash
+          "$h  MoreThanTinyTask.exe" | Out-File -Encoding ascii dist/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
           name: MoreThanTinyTask-windows
-          path: dist/MoreThanTinyTask.exe
+          path: |
+            dist/MoreThanTinyTask.exe
+            dist/SHA256SUMS.txt
+
+      # Pushing a tag like v1.2.0 publishes a GitHub Release with the exe attached
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: More Than Tiny Task ${{ github.ref_name }}
+          generate_release_notes: true
+          body: |
+            ## Download
+            **[MoreThanTinyTask.exe](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/MoreThanTinyTask.exe)** — Windows 10/11, no install needed. Just run it.
+
+            > Windows may show *"Windows protected your PC"* because the app isn't code-signed. Click **More info → Run anyway**.
+          files: |
+            dist/MoreThanTinyTask.exe
+            dist/SHA256SUMS.txt

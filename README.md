@@ -1,65 +1,111 @@
+<div align="center">
+
 # More Than Tiny Task
 
-A macro recorder for Windows in the spirit of TinyTask: record your mouse & keyboard, play it back as many times as you want. Plus the things TinyTask is missing: a **timeline editor**, **re-recording just one part**, **delays between runs**, and a **centre-the-mouse key**.
+**Record your mouse & keyboard. Edit it like a video. Replay it as many times as you want.**
 
-![screenshot](docs/screenshot.png)
+A free Windows macro recorder inspired by TinyTask, with a timeline editor, partial re-recording,
+delays between runs and a one-key "centre the mouse".
 
-## Features
+[![Download](https://img.shields.io/badge/Download-Windows%20.exe-5b8cff?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/BarBaroNN/more-than-tiny-task/releases/latest/download/MoreThanTinyTask.exe)
+&nbsp;
+[![Latest release](https://img.shields.io/github/v/release/BarBaroNN/more-than-tiny-task?style=for-the-badge&color=2c313d)](https://github.com/BarBaroNN/more-than-tiny-task/releases/latest)
 
-**Record & play**
-- Records mouse moves, clicks, scrolling and keyboard with precise timing.
-- Repeat **N times** or **unlimited**, with a **delay between runs** (seconds / minutes / hours) and a live countdown.
-- Playback **speed** control (0.1× – 20×).
-- Held keys / mouse buttons are released automatically when playback stops.
+<img src="docs/preview-playback.gif" alt="More Than Tiny Task playing a macro 10 times with a 1-minute delay" width="900">
 
-**Timeline editor** (like a video editor)
-- Tracks for mouse path (X/Y graph), clicks, scroll and keys. Zoom with **Ctrl + mouse wheel**, scroll with the wheel.
-- Drag on the timeline to **select a range**; drag the blue edges to adjust it. Click the ruler to move the playhead.
-- **Re-record selection** (Ctrl+R): record a new take that replaces only the selected part — everything after it shifts automatically. The cursor is first moved to where it was at that point so the take connects seamlessly.
-- **Insert recording** (Ctrl+I) at the playhead.
-- Cut / Copy / Paste / Delete (ripple editing), insert pause, change speed of a section, trim, remove or simplify mouse moves.
-- Click an event to select it, **drag it to move it in time**, or edit exact time / delay / X / Y in the event table.
-- **Preview selection** plays only the selected part. Full **undo / redo**.
+</div>
 
-**Mouse centring** — a hotkey smoothly glides the cursor to the centre of the screen (current or primary monitor; duration & easing configurable). Works while recording too — the glide is recorded.
+## Why not just TinyTask?
 
-**Window options** — stay on top, compact mode, opacity, tray icon / minimize to tray, auto-hide while recording or playing, small click-through on-screen REC/PLAY indicator, countdown before recording.
+TinyTask is great until you mess up one click in a 2-minute recording and have to redo the whole thing.
+More Than Tiny Task keeps the same **record → play** simplicity and adds:
 
-## Default hotkeys (global, changeable in Settings → Hotkeys)
+| | TinyTask | More Than Tiny Task |
+|---|:---:|:---:|
+| Record & replay mouse / keyboard | ✅ | ✅ |
+| Repeat N times or forever | ✅ | ✅ |
+| **Wait between runs** (e.g. 10 runs, 1 min apart) | — | ✅ |
+| **Timeline editor** (cut, copy, paste, move, delete) | — | ✅ |
+| **Re-record just one part** of a macro | — | ✅ |
+| **Glide the mouse to the screen centre** with a hotkey | — | ✅ |
+| Custom hotkeys, stay on top, compact mode, tray | — | ✅ |
+| Undo / redo | — | ✅ |
 
-| Key | Action |
-|-----|--------|
-| F8  | Start / stop recording |
-| F9  | Start / stop playback |
-| Esc | Emergency stop |
-| F10 | Glide mouse to screen centre |
+## Download & run
 
-Hotkey keys are never recorded into the macro.
+1. Download **[MoreThanTinyTask.exe](https://github.com/BarBaroNN/more-than-tiny-task/releases/latest/download/MoreThanTinyTask.exe)** (Windows 10 / 11).
+2. Double-click it. No installation needed.
 
-## Running
+> **"Windows protected your PC"?** The app isn't code-signed (certificates are expensive), so SmartScreen warns about it. Click **More info → Run anyway**. Some antivirus tools also flag macro recorders because they read keyboard input. The exe is built automatically from this source code by GitHub Actions, and every release lists its SHA-256 checksum.
 
-**Ready-made exe:** every push builds `MoreThanTinyTask.exe` in GitHub Actions — open the repo's **Actions** tab → latest run → *Artifacts*.
+## How to use it
 
-**From source** (Python 3.10+): double-click `run.bat`, or
+| Key | What it does |
+|-----|--------------|
+| **F8**  | Start / stop recording |
+| **F9**  | Start / stop playback |
+| **Esc** | Emergency stop |
+| **F10** | Glide the mouse to the centre of the screen |
+
+All hotkeys work while other windows are focused and can be changed in **Settings → Hotkeys**. They are never recorded into your macro.
+
+1. Press **F8**, do your thing, press **F8** again.
+2. Set **Repeat** (or tick *Unlimited*), an optional **Delay between runs**, and the **Speed**.
+3. Press **F9**. Press **Esc** at any time to stop.
+4. **Ctrl+S** saves the macro as a `.mttk` file. Drag a file onto the window to open it.
+
+### Fix one part without redoing everything
+
+<img src="docs/preview-editor.png" alt="Timeline editor with a selected range" width="900">
+
+- **Drag** across the timeline to select the part you want to change. Drag the blue edges to fine-tune it.
+- Press **● Re-record selection** (Ctrl+R) and do that part again. Only the selection is replaced and everything after it shifts to fit. The cursor is first moved to where it was at that moment, so the new take joins up with the rest.
+- **● Insert recording** (Ctrl+I) adds a new take at the red playhead.
+- **Cut / Copy / Paste / Delete** work on the selection. **More ▾** has *insert pause*, *change speed of a section*, *trim* and *remove / simplify mouse moves*.
+- **Click** a key or click block to select it and **drag** it to move it in time. Double-click to edit exact times, delays and coordinates in the event table.
+- **▶ Preview selection** plays only the selected part. **Ctrl+Z / Ctrl+Y** undo and redo everything.
+- **Ctrl + mouse wheel** zooms, the mouse wheel scrolls, **Fit** shows the whole macro.
+
+<img src="docs/preview-rerecord.png" alt="Re-recording a selected section" width="900">
+
+### Small and always on top
+
+The **pin** button keeps the window above your game or app, and **compact mode** hides the editor:
+
+<img src="docs/preview-compact.png" alt="Compact mode" width="600">
+
+Under **Settings** you'll also find window opacity, minimize to tray, auto-hide while recording or playing, a small click-through **REC / PLAY** indicator, a countdown before recording, mouse-move sampling and the centre-mouse options (which monitor, animation speed and style).
+
+<img src="docs/preview-hotkeys.png" alt="Hotkey settings" width="560">
+
+## Tips
+
+- **Admin apps / some games:** Windows blocks input from normal programs into apps running as Administrator. Right-click the exe → **Run as administrator** if playback doesn't reach them.
+- **Display scaling:** record and play on the same monitor setup and scaling, because mouse positions are absolute.
+- **Huge recordings:** *More ▾ → Simplify mouse moves* thins out mouse movement without touching clicks or keys.
+
+## Run from source
+
+Requires Python 3.10+.
 
 ```bat
-pip install -r requirements.txt
-python -m mttk
+git clone https://github.com/BarBaroNN/more-than-tiny-task.git
+cd more-than-tiny-task
+run.bat
 ```
 
-**Build the exe yourself:** double-click `build.bat` → `dist\MoreThanTinyTask.exe`.
+`build.bat` builds `dist\MoreThanTinyTask.exe` locally. To publish a new version, see [RELEASING.md](RELEASING.md).
 
-Macros are saved as `.mttk` files (JSON). You can drag a file onto the window, or pass it on the command line.
-
-> Tip: to automate apps running as Administrator, run More Than Tiny Task as Administrator too (Windows blocks input from normal apps into elevated ones).
-
-## Development
+<details>
+<summary>Development</summary>
 
 ```bash
 pip install -r requirements-dev.txt
 python -m pytest -q tests
 ```
 
-- `mttk/model.py` – event model and pure editing operations (unit tested)
-- `mttk/backend.py` – recorder, player, global hotkeys, mouse centring (pynput)
-- `mttk/ui/` – PySide6 interface (timeline, event table, settings, theme)
+- `mttk/model.py`: event model and pure editing operations (unit tested)
+- `mttk/backend.py`: recorder, player, global hotkeys, mouse centring (pynput)
+- `mttk/ui/`: PySide6 interface (timeline, event table, settings, theme)
+
+</details>
