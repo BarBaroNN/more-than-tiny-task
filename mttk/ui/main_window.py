@@ -572,7 +572,10 @@ class MainWindow(QMainWindow):
             elif self.state == ARMED:
                 self._launch_recording()
             elif self.state == IDLE:
-                self.start_recording("new")
+                if self._sel():
+                    self.rerecord_selection(start_now=True)
+                else:
+                    self.start_recording("new")
         elif action == "play":
             if self.state == PLAYING:
                 self.stop_playback()
@@ -696,11 +699,17 @@ class MainWindow(QMainWindow):
         if self.state != IDLE:
             return
         sel = self.timeline.selection
+        rec = self._hk("record")
         if sel:
             a, z = sel
-            self.lbl_run.setText(f"▶ Play uses selection {fmt_time(a, 2)} → {fmt_time(z, 2)}")
+            self.lbl_run.setText(f"▶ Play uses selection {fmt_time(a, 2)} → {fmt_time(z, 2)}  ·  "
+                                 f"● {rec} re-records it")
             self.btn_play.setToolTip("Play the selected part (click an empty spot on the timeline to clear)")
-        elif self._resume_point() > 0:
+            self.btn_record.setToolTip(f"Re-record the selected part (starts when you press {rec}; "
+                                       "click an empty spot on the timeline to clear the selection)")
+            return
+        self.btn_record.setToolTip(f"Record a new macro ({rec})")
+        if self._resume_point() > 0:
             self.lbl_run.setText(f"▶ Play continues from {fmt_time(self._resume_point(), 2)}  ·  "
                                  f"<a href='start' style='color:{theme.ACCENT}'>play from the start</a>")
             self.btn_play.setToolTip("Play from the playhead (the red line)")
@@ -893,22 +902,27 @@ class MainWindow(QMainWindow):
         elif self.state == ARMED:
             self._launch_recording()
         elif self.state == IDLE:
-            self.start_recording("new")
+            if self._sel():
+                self.rerecord_selection()  # arms; F8 starts it
+            else:
+                self.start_recording("new")
         self._update_state_ui()
 
-    def rerecord_selection(self):
+    def rerecord_selection(self, start_now: bool = False):
+        """Re-record the selected range. From the UI this arms and waits for the
+        record key; ``start_now`` (the record key itself) starts right away."""
         if self.state != IDLE:
             return
         if not self._sel():
             QMessageBox.information(self, APP_NAME, "Drag on the timeline to select the part you want to re-record.")
             return
-        self.start_recording("replace")
+        self.start_recording("replace", wait_for_key=not start_now)
 
     def insert_recording(self):
         if self.state == IDLE:
             self.start_recording("insert")
 
-    def start_recording(self, mode: str):
+    def start_recording(self, mode: str, wait_for_key: bool = True):
         if self.state != IDLE:
             return
         try:
@@ -924,7 +938,7 @@ class MainWindow(QMainWindow):
         else:
             self._rec_ctx = {"mode": "new", "start": 0.0}
 
-        if mode in ("replace", "insert") and self.hotkeys:
+        if mode in ("replace", "insert") and wait_for_key and self.hotkeys:
             # Clicking Re-record / Insert happens in our window, so don't start
             # yet: wait until the user is set up and presses the record key.
             self.state = ARMED
