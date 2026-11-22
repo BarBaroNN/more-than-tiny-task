@@ -79,3 +79,50 @@ def test_checkpoint_that_raises_counts_as_failed():
 def test_checkpoints_skipped_without_checker():
     p, done, _ = run_player([Event(0.0, CHECK, ref="x")], None)
     assert done == [True]
+
+
+# ------------------------------------------- position (checkpoint key while playing)
+def test_position_follows_playback_and_speed():
+    seen = {}
+
+    def check(e, run):
+        seen[e.ref] = p.position()
+        return True
+
+    p = Player([Event(0.0, CHECK, ref="a"), Event(2.0, CHECK, ref="b")], on_check=check, speed=2.0)
+    assert p.position() is None          # not started
+    p.start()
+    time.sleep(0.15)
+    run, t = p.position()                # 0.15s in at double speed: about 0.3s of the macro
+    p._thread.join(5)
+    assert run == 1 and 0.2 <= t < 2.0
+    assert seen == {"a": (1, 0.0), "b": (1, 2.0)}   # held at the checkpoint while it's checked
+
+
+def test_position_holds_during_a_check_and_continues_after():
+    def check(e, run):
+        if e.ref == "slow":
+            time.sleep(0.4)
+        return True
+
+    p = Player([Event(0.0, CHECK, ref="slow"), Event(1.0, CHECK, ref="end")], on_check=check)
+    p.start()
+    time.sleep(0.2)
+    during = p.position()
+    time.sleep(0.4)                      # 0.6s in, 0.4s of it spent checking
+    after = p.position()
+    p.stop()
+    p._thread.join(5)
+    assert during == (1, 0.0)
+    assert 0.1 < after[1] < 0.5
+
+
+def test_position_stays_at_the_end_between_runs():
+    p = Player([Event(0.0, CHECK, ref="a"), Event(0.1, CHECK, ref="b")], on_check=lambda e, run: True,
+               repeats=2, delay=0.6)
+    p.start()
+    time.sleep(0.35)                     # run 1 is done, waiting for run 2
+    pos = p.position()
+    p.stop()
+    p._thread.join(5)
+    assert pos == (1, 0.1)

@@ -49,7 +49,7 @@ More Than Tiny Task keeps the same **record → play** simplicity and adds:
 | **F9**  | Start / stop playback (continues from the playhead, or plays only the selected part if you've selected one) |
 | **Esc** | Stop playback |
 | **F10** | Glide the mouse to the centre of the screen. Works while recording, and the glide is recorded |
-| **F7**  | Add a [screen checkpoint](#screen-checkpoints--phone-alerts): saves a picture of the screen right now (while recording, or at the playhead) |
+| **F7**  | Add a [screen checkpoint](#screen-checkpoints--phone-alerts): saves a picture of the screen right now, at the current moment of the recording or playback (or at the playhead) |
 
 All hotkeys work while other windows are focused and can be changed in **Settings → Hotkeys**.
 F7, F8, F9 and F10 are never recorded and never reach the app you're using, so F10 won't open its menu bar.
@@ -90,7 +90,7 @@ Two switches next to *Speed* control where the mouse goes during playback:
 
 A lag spike can make a macro turn a little too far or click a little too early, and from then on every click lands in the wrong place. Checkpoints catch that: at chosen moments the macro compares the screen with a picture of how it should look, and **stops before doing any damage** if it doesn't match.
 
-1. **Add checkpoints.** While recording, press **F7** at the moments that matter (a menu is open, you're standing at the right spot…). Or stop playback at the right moment, so the playhead is there, and press **F7** or **◆ Checkpoint**. Checkpoints show up as green ◆ on the *Checks* track and move with cuts, inserts and re-recordings like any other event.
+1. **Add checkpoints.** While recording or playing, press **F7** at the moments that matter (a menu is open, you're standing at the right spot…). The checkpoint is added at that exact moment of the macro. One added during playback is checked from the next playback on; the run in progress plays on unchanged. When the macro isn't playing, **F7** or **◆ Checkpoint** adds one at the playhead. Checkpoints show up as green ◆ on the *Checks* track and move with cuts, inserts and re-recordings like any other event.
 2. **Choose what to compare.** Double-click a ◆ and drag over the part of the screen that must look like this, such as the shop window or a HUD element. Leave out things that change on their own (chat, timers, animations). A tight area works best: a change inside it counts for more of the score.
 3. **Decide how strict.** *Required match* (default 80%) is how much of the area must look the same, so a popup covering a corner doesn't stop the macro. *Wait up to* (default 5 s) gives a laggy screen time to catch up: playback pauses at the checkpoint and keeps checking, and everything after it waits too. *Allowed shift* lets the picture be a few pixels off. **Test against the screen now** shows the score you'd get.
 

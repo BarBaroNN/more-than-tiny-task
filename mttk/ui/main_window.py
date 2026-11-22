@@ -120,7 +120,8 @@ class MainWindow(QMainWindow):
         self._check_failure = None
         self._fail_dialog = None
         self._alert_text = ""
-        self._osd_note = ("", 0.0)   # short message shown instead of the REC timer
+        self._osd_note = ("", 0.0)   # short message shown instead of the REC / PLAY status
+        self._capture_excluded = False  # this window and the indicator kept out of screenshots
 
         self.undo = QUndoStack(self)
         self.undo.cleanChanged.connect(lambda _c: self._update_title())
@@ -582,7 +583,7 @@ class MainWindow(QMainWindow):
         self._edit_buttons["checkpoint"].setToolTip(
             "Add a screen checkpoint at the playhead: a picture of how the screen should look at that moment. "
             "During playback the macro checks it and stops (with an alert) if the screen looks wrong."
-            + (f"\n{cp} adds one straight away, also while recording." if cp else ""))
+            + (f"\n{cp} adds one straight away, also while recording or playing." if cp else ""))
 
     def _hk(self, action):
         return K.format_hotkey(self.settings.hotkeys.get(action, ""))
@@ -608,7 +609,7 @@ class MainWindow(QMainWindow):
         if action == "stop":
             return self.state == PLAYING
         if action == "checkpoint":
-            return self.state in (IDLE, RECORDING)
+            return self.state in (IDLE, RECORDING, PLAYING)
         return True
 
     def _on_hotkey(self, action: str):
@@ -1113,8 +1114,8 @@ class MainWindow(QMainWindow):
             return
         el = self.recorder.elapsed()
         self.lbl_time.setText(fmt_time(el, 1))
-        note, until = self._osd_note
-        if note and time.time() < until:
+        if self._noting():
+            note = self._osd_note[0]
             self.lbl_status.setText(note)
             if self.settings.show_osd:
                 self.osd.show_message(note, theme.GREEN)
@@ -1262,6 +1263,8 @@ class MainWindow(QMainWindow):
         self._update_time_label(abs_t)
         self.progress.setValue(int(1000 * t / self._play_duration))
         self.lbl_run.setText(self._run_text(run, total))
+        if self._noting():
+            return
         self.lbl_status.setText(f"Playing  ·  {self._run_text(run, total)}  ·  {self._hk('stop')} to stop")
         if self.settings.show_osd:
             self.osd.show_message(f"PLAY  {self._run_text(run, total)}   ·   {self._hk('stop')} to stop", theme.GREEN)
@@ -1271,9 +1274,11 @@ class MainWindow(QMainWindow):
             return
         total = self._play_runs
         txt = f"Next run ({next_run:,} of {'∞' if total == 0 else f'{total:,}'}) in {fmt_time(remaining, 0) if remaining >= 60 else f'{remaining:.1f}s'}"
-        self.lbl_status.setText(f"Waiting  ·  {txt}  ·  {self._hk('stop')} to stop")
         self.lbl_run.setText(txt)
         self.progress.setValue(0)
+        if self._noting():
+            return
+        self.lbl_status.setText(f"Waiting  ·  {txt}  ·  {self._hk('stop')} to stop")
         if self.settings.show_osd:
             self.osd.show_message(f"WAIT  {txt}", theme.YELLOW)
 
@@ -1334,24 +1339,31 @@ class MainWindow(QMainWindow):
             if self.hotkeys:
                 self.hotkeys.enabled = True
 
-    def _grab_without_us(self, rect):
-        """Screenshot of ``rect`` with our own windows (this window, dialogs,
-        the indicator) left out, so they never end up in a checkpoint."""
-        hidden = []
-        for w in QApplication.topLevelWidgets():
-            if w.isVisible() and winutil.set_exclude_from_capture(int(w.winId()), True):
-                hidden.append(w)
+    @contextlib.contextmanager
+    def _without_us(self):
+        """Screenshots taken inside this block leave out our own windows (this
+        window, dialogs, the indicator), so they never end up in a checkpoint."""
+        # already left out for the whole playback: they stay that way afterwards
+        staying = (self, self.osd) if self._capture_excluded else ()
+        hidden = [w for w in QApplication.topLevelWidgets()
+                  if w.isVisible() and not any(w is s for s in staying)
+                  and winutil.set_exclude_from_capture(int(w.winId()), True)]
         if hidden:
             time.sleep(0.12)  # give Windows a frame or two to redraw without them
         try:
-            return V.grab(rect)
+            yield
         finally:
             for w in hidden:
                 winutil.set_exclude_from_capture(int(w.winId()), False)
 
+    def _grab_without_us(self, rect):
+        with self._without_us():
+            return V.grab(rect)
+
     def _exclude_us_from_capture(self, on: bool):
         """While a macro with checkpoints plays, keep this window and the
         indicator out of the screenshots it compares."""
+        self._capture_excluded = on
         winutil.set_exclude_from_capture(int(self.winId()), on)
         self.osd.exclude_from_capture(on)
 
@@ -1381,17 +1393,67 @@ class MainWindow(QMainWindow):
         return [r[0] + dx, r[1] + dy, r[2], r[3]]
 
     def _note(self, text: str, color: str = theme.GREEN, ms: int = 3000):
-        """A short message in the status line and the on-screen indicator."""
+        """A short message in the status line and the on-screen indicator. While
+        recording or playing it stands in for the REC / PLAY status for ``ms``."""
         self.lbl_status.setText(text)
         self._osd_note = (text, time.time() + ms / 1000)
         if self.state == RECORDING:
             self._tick_recording()
         elif self.settings.show_osd:
-            self.osd.show_message(text, color, hide_after_ms=ms)
+            # while playing, the next progress update brings PLAY back instead of hiding it
+            self.osd.show_message(text, color, hide_after_ms=0 if self.state == PLAYING else ms)
+
+    def _noting(self) -> bool:
+        """Is a short message from ``_note`` still showing?"""
+        note, until = self._osd_note
+        return bool(note) and time.time() < until
+
+    def _playback_moment(self) -> Optional[float]:
+        """Where in the macro playback is right now, in macro time (None before it starts)."""
+        pos = self.player.position() if self.player else None
+        if pos is None:
+            return None
+        run, t = pos
+        if run == 1:
+            t += self._resume_at  # the first run started part-way in
+        return self._play_offset + t
+
+    def _checkpoint_during_playback(self):
+        """Checkpoint key while playing: the screen as it is now, at the moment
+        of the macro that's playing. The run in progress plays on unchanged; the
+        new checkpoint is checked from the next playback on."""
+        mon = winutil.monitor_rect_at(*winutil.cursor_pos())
+        img = t = None
+        if mon:
+            with self._without_us():
+                # read right before the screenshot: everything played so far is in
+                # it, so the checkpoint goes after those events and before the rest
+                t = self._playback_moment()
+                img = V.grab(mon)
+        if img is None or img.isNull() or t is None:
+            self._note("Couldn't take a screenshot for the checkpoint", theme.RED)
+            return
+        spec = self._new_checkpoint_spec(img, mon)
+        dx, dy = self._play_shift
+        if dx or dy:
+            # "start from current cursor" moved the macro: store the picture where it
+            # would be unshifted, so next time it moves with the mouse positions again
+            for key in ("image_rect", "region"):
+                x, y, w, h = spec[key]
+                spec[key] = [x - dx, y - dy, w, h]
+        ref = V.new_id()
+        # apply_edit refuses edits while playing; this one doesn't touch the events being played
+        self.undo.push(SetEventsCommand(self, self.events, M.add_event(self.events, Event(t, CHECK, ref=ref)),
+                                        "Add checkpoint", self.meta, M.with_checkpoints(self.meta, {ref: spec})))
+        self._note(f"◆ {spec['name']} added at {fmt_time(t, 2)}  ·  checked from the next playback")
 
     def hotkey_checkpoint(self):
-        """Checkpoint key: save the screen as it is now. While recording, at the
-        current moment of the recording; otherwise at the playhead."""
+        """Checkpoint key: save the screen as it is now. While recording or
+        playing, at the current moment of the recording / macro; otherwise at
+        the playhead."""
+        if self.state == PLAYING:
+            self._checkpoint_during_playback()
+            return
         if self.state not in (RECORDING, IDLE):
             return
         img, mon = self._take_checkpoint_picture()

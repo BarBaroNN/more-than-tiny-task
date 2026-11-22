@@ -355,6 +355,9 @@ class Player:
         self._held_keys = {}
         self._held_buttons = set()
         self.win_keys = winutil.IS_WINDOWS  # send keys with keybd_event like TinyTask
+        # for position(): (run, start, events, index of the next event, held t or None),
+        # replaced as a whole so another thread never sees half an update
+        self._pos = None
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="mttk-player", daemon=True)
@@ -370,6 +373,25 @@ class Player:
     @property
     def running(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
+
+    def position(self) -> Optional[tuple]:
+        """``(run, t)``: where in the clip playback is right now, for any thread.
+
+        ``t`` is after every event already played and before the next one, so a
+        checkpoint added at ``t`` lands between what's already on screen and what
+        isn't yet. It holds still while a checkpoint is being checked, and at the
+        end of the clip between runs. None before the first run starts.
+        """
+        p = self._pos
+        if p is None:
+            return None
+        run, start, events, i, held = p
+        if held is not None:
+            return run, held
+        if i >= len(events):
+            return run, events[-1].t if events else 0.0
+        elapsed = (time.perf_counter() - start) * self.speed
+        return run, stop_position(elapsed, events[i - 1].t if i else None, events[i].t)
 
     def _wait_until(self, target: float) -> bool:
         while True:
@@ -409,9 +431,10 @@ class Player:
         events = self.first_run if (run == 1 and self.first_run is not None) else self.events
         start = time.perf_counter()
         last_report = 0.0
+        self._pos = (run, start, events, 0, None)
         self.on_progress(run, self.repeats, 0.0)
         done_t = None
-        for e in events:
+        for i, e in enumerate(events):
             target = start + e.t / self.speed
             if not self._wait_until(target):
                 elapsed = (time.perf_counter() - start) * self.speed
@@ -419,6 +442,7 @@ class Player:
                 return False
             if e.kind == CHECK:
                 if self.on_check is not None:
+                    self._pos = (run, start, events, i, e.t)
                     self.on_progress(run, self.repeats, e.t)
                     before = time.perf_counter()
                     try:
@@ -434,12 +458,14 @@ class Player:
                         self.on_progress(run, self.repeats, e.t)
                         return False
                 done_t = e.t
+                self._pos = (run, start, events, i + 1, None)
                 continue
             try:
                 self._do(e)
             except Exception:
                 pass
             done_t = e.t
+            self._pos = (run, start, events, i + 1, None)
             now = time.perf_counter()
             if now - last_report > 0.04:
                 last_report = now
