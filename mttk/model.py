@@ -19,8 +19,9 @@ MOVE = "move"
 CLICK = "click"
 SCROLL = "scroll"
 KEY = "key"
+CHECK = "check"   # screen checkpoint: compare the screen with a saved picture
 
-KINDS = (MOVE, CLICK, SCROLL, KEY)
+KINDS = (MOVE, CLICK, SCROLL, KEY, CHECK)
 
 MODIFIER_KEY_NAMES = {
     "ctrl", "ctrl_l", "ctrl_r", "shift", "shift_l", "shift_r",
@@ -49,6 +50,8 @@ class Event:
     # unknown); played back exactly so scan-code readers see the same key
     scan: int = 0
     ext: bool = False
+    # check: id of the checkpoint (picture, area, settings) in meta["checkpoints"]
+    ref: str = ""
 
     def shifted(self, dt: float) -> "Event":
         return replace(self, t=max(0.0, self.t + dt))
@@ -90,6 +93,8 @@ class Event:
             return f"Scroll ({self.dx}, {self.dy}) at ({self.x}, {self.y})"
         if self.kind == KEY:
             return f"Key {self.key_label} {'down' if self.pressed else 'up'}"
+        if self.kind == CHECK:
+            return "Screen checkpoint"
         return self.kind
 
     def to_dict(self) -> dict:
@@ -228,6 +233,13 @@ def set_delay(events: Sequence[Event], index: int, delay: float) -> List[Event]:
     prev_t = events[index - 1].t if index > 0 else 0.0
     dt = (prev_t + max(0.0, delay)) - events[index].t
     return list(events[:index]) + [e.shifted(dt) for e in events[index:]]
+
+
+def add_event(events: Sequence[Event], new: Event) -> List[Event]:
+    """Insert one event in time order, after any events at the same time.
+    Nothing else moves (unlike ``insert_at``)."""
+    i = bisect.bisect_right(times(events), new.t)
+    return list(events[:i]) + [new] + list(events[i:])
 
 
 def delete_indices(events: Sequence[Event], indices: Iterable[int]) -> List[Event]:
@@ -373,6 +385,45 @@ def scale_events(events: Sequence[Event], src: Sequence[int], dst: Sequence[int]
     return [replace(e, x=tx(e.x), y=ty(e.y)) if e.kind in POSITIONAL else e for e in events]
 
 
+# ------------------------------------------------------------ checkpoints
+# A checkpoint is a CHECK event (so it moves with cut / insert / re-record
+# like any other event) whose ``ref`` points at its data in
+# meta["checkpoints"]: the reference picture, the area to compare and how
+# strict to be. The data dicts are treated as immutable (undo keeps old meta).
+
+def checkpoint_refs(events: Iterable[Event]) -> set:
+    return {e.ref for e in events if e.kind == CHECK and e.ref}
+
+
+def checkpoints_of(meta: dict) -> dict:
+    cps = (meta or {}).get("checkpoints")
+    return cps if isinstance(cps, dict) else {}
+
+
+def with_checkpoints(meta: dict, updates: dict) -> dict:
+    """New meta with ``updates`` (id -> data) merged into its checkpoints."""
+    out = dict(meta or {})
+    out["checkpoints"] = {**checkpoints_of(meta), **updates}
+    return out
+
+
+def prune_checkpoints(meta: dict, events: Sequence[Event]) -> dict:
+    """New meta keeping only checkpoint data that some event still uses."""
+    cps = checkpoints_of(meta)
+    if not cps:
+        out = dict(meta or {})
+        out.pop("checkpoints", None)
+        return out
+    used = checkpoint_refs(events)
+    out = dict(meta)
+    kept = {k: v for k, v in cps.items() if k in used}
+    if kept:
+        out["checkpoints"] = kept
+    else:
+        out.pop("checkpoints", None)
+    return out
+
+
 # ---------------------------------------------------------------- file io
 
 @dataclass
@@ -384,7 +435,7 @@ class Macro:
         data = {
             "format": "more-than-tiny-task",
             "version": FILE_VERSION,
-            "meta": self.meta,
+            "meta": prune_checkpoints(self.meta, self.events),
             "events": [e.to_dict() for e in self.events],
         }
         with open(path, "w", encoding="utf-8") as fh:

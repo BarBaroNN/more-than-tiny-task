@@ -1,7 +1,7 @@
 """Small click-through on-screen indicator shown while recording / playing."""
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter
 from PySide6.QtWidgets import QWidget
 
@@ -19,8 +19,19 @@ class OSD(QWidget):
         self._font = QFont(self.font())
         self._font.setPointSizeF(10.5)
         self._font.setWeight(QFont.DemiBold)
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(self.hide)
 
-    def show_message(self, text: str, color: str = theme.RED):
+    def exclude_from_capture(self, on: bool) -> None:
+        """Keep the indicator out of screenshots (checkpoint pictures)."""
+        from .. import winutil
+        winutil.set_exclude_from_capture(int(self.winId()), on)
+
+    def show_message(self, text: str, color: str = theme.RED, hide_after_ms: int = 0):
+        self._hide_timer.stop()
+        if hide_after_ms:
+            self._hide_timer.start(hide_after_ms)
         self._text = text
         self._color = color
         from PySide6.QtGui import QFontMetrics

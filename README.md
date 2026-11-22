@@ -32,6 +32,7 @@ More Than Tiny Task keeps the same **record → play** simplicity and adds:
 | **Works across resolutions** (record on 1440p, play on 1080p) | — | ✅ |
 | Custom hotkeys, stay on top, compact mode, tray | — | ✅ |
 | Undo / redo | — | ✅ |
+| **Screen checkpoints**: stop and alert your phone if the screen looks wrong | — | ✅ |
 
 ## Download & run
 
@@ -48,9 +49,10 @@ More Than Tiny Task keeps the same **record → play** simplicity and adds:
 | **F9**  | Start / stop playback (continues from the playhead, or plays only the selected part if you've selected one) |
 | **Esc** | Stop playback |
 | **F10** | Glide the mouse to the centre of the screen. Works while recording, and the glide is recorded |
+| **F7**  | Add a [screen checkpoint](#screen-checkpoints--phone-alerts): saves a picture of the screen right now (while recording, or at the playhead) |
 
 All hotkeys work while other windows are focused and can be changed in **Settings → Hotkeys**.
-F8, F9 and F10 are never recorded and never reach the app you're using, so F10 won't open its menu bar.
+F7, F8, F9 and F10 are never recorded and never reach the app you're using, so F10 won't open its menu bar.
 **Esc only stops playback.** While recording it's just a normal key (and gets recorded), so the only way to stop a recording is F8.
 
 1. Press **F8**, do your thing, press **F8** again.
@@ -83,6 +85,26 @@ Two switches next to *Speed* control where the mouse goes during playback:
 - **Ctrl + mouse wheel** zooms, the mouse wheel scrolls, **Fit** shows the whole macro.
 
 <img src="docs/preview-rerecord.png" alt="Re-recording a selected section" width="900">
+
+### Screen checkpoints & phone alerts
+
+A lag spike can make a macro turn a little too far or click a little too early, and from then on every click lands in the wrong place. Checkpoints catch that: at chosen moments the macro compares the screen with a picture of how it should look, and **stops before doing any damage** if it doesn't match.
+
+1. **Add checkpoints.** While recording, press **F7** at the moments that matter (a menu is open, you're standing at the right spot…). Or stop playback at the right moment, so the playhead is there, and press **F7** or **◆ Checkpoint**. Checkpoints show up as green ◆ on the *Checks* track and move with cuts, inserts and re-recordings like any other event.
+2. **Choose what to compare.** Double-click a ◆ and drag over the part of the screen that must look like this, such as the shop window or a HUD element. Leave out things that change on their own (chat, timers, animations). A tight area works best: a change inside it counts for more of the score.
+3. **Decide how strict.** *Required match* (default 80%) is how much of the area must look the same, so a popup covering a corner doesn't stop the macro. *Wait up to* (default 5 s) gives a laggy screen time to catch up: playback pauses at the checkpoint and keeps checking, and everything after it waits too. *Allowed shift* lets the picture be a few pixels off. **Test against the screen now** shows the score you'd get.
+
+When a checkpoint fails, the macro **stops, releases every held key and mouse button**, beeps and shows what it expected next to what was on screen, including a hint when the view looks shifted (e.g. *"looks shifted by 60px left"*). Press F9 to continue from the failed checkpoint once things are fixed. *Screen checkpoints* under **Safety** turns checking off for a run.
+
+**Phone alerts** (Settings → Checkpoints & alerts) send you a notification with a screenshot when a checkpoint fails:
+
+- **ntfy** (easiest, free, no account): install the [ntfy app](https://ntfy.sh), press *New random topic* in Settings and subscribe to that topic in the app.
+- **Telegram:** create a bot with @BotFather, paste its token, send the bot a message and press *Find my chat ID*.
+- **Discord:** paste a channel webhook URL.
+
+Press *Send a test alert* to check it works. You can also get a message when a macro finishes normally. Tokens and webhooks are stored in the app's settings on this PC, never in `.mttk` files, so sharing a macro doesn't share them.
+
+> Checkpoints compare pictures; they don't read text. The app's own window and the REC / PLAY indicator are left out of the screenshots. Some games in exclusive full-screen mode show up black in screenshots: use borderless / windowed mode if *Test against the screen now* shows a black picture.
 
 ### Small and always on top
 
@@ -124,6 +146,8 @@ python -m pytest -q tests
 
 - `mttk/model.py`: event model and pure editing operations (unit tested)
 - `mttk/backend.py`: recorder, player, global hotkeys, mouse centring (pynput)
+- `mttk/vision.py`: screen checkpoints: screenshot comparison and the checker used during playback
+- `mttk/notify.py`: phone alerts (ntfy, Telegram, Discord) using only the standard library
 - `mttk/ui/`: PySide6 interface (timeline, event table, settings, theme)
 
 </details>

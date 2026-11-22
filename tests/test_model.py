@@ -143,3 +143,36 @@ def test_resume_from_event_exactly_at_t_is_kept():
 
 def test_resume_from_zero_is_whole_macro():
     assert ts(M.resume_from(BASE, 0.0)) == ts(BASE)
+
+
+# ------------------------------------------------------- screen checkpoints
+from mttk.model import CHECK  # noqa: E402
+
+
+def test_checkpoints_move_with_edits_and_add_event():
+    events = M.add_event(BASE, ev(2.0, CHECK, ref="c1"))
+    assert [e.kind for e in events].index(CHECK) == 3      # after the move at 2.0; nothing else moved
+    assert ts(events) == [0.0, 1.0, 2.0, 2.0, 3.0, 4.0]
+    out = M.delete_range(events, 0.5, 1.5)
+    assert [e.t for e in out if e.kind == CHECK] == [1.0]
+    out = M.insert_gap(events, 1.0, 5.0)
+    assert [e.t for e in out if e.kind == CHECK] == [7.0]
+
+
+def test_checkpoint_data_saved_and_pruned():
+    events = [ev(0.0, x=1, y=1), ev(0.5, CHECK, ref="keep")]
+    meta = M.with_checkpoints({"screen": [0, 0, 10, 10]}, {"keep": {"name": "A"}, "gone": {"name": "B"}})
+    path = os.path.join(tempfile.mkdtemp(), "m.mttk")
+    M.Macro(events, meta).save(path)
+    loaded = M.Macro.load(path)
+    assert loaded.events == events and loaded.events[1].ref == "keep"
+    assert set(M.checkpoints_of(loaded.meta)) == {"keep"}
+    assert M.checkpoint_refs(loaded.events) == {"keep"}
+    assert "checkpoints" not in M.prune_checkpoints(meta, [])
+    assert set(M.checkpoints_of(meta)) == {"keep", "gone"}    # original meta untouched
+
+
+def test_resume_from_skips_earlier_checkpoints():
+    events = [ev(0.0, CHECK, ref="a"), ev(1.0, x=2, y=2), ev(2.0, CHECK, ref="b")]
+    out = M.resume_from(events, 1.5)
+    assert [e.ref for e in out if e.kind == CHECK] == ["b"]

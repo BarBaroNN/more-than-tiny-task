@@ -8,19 +8,22 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyMod
 from PySide6.QtGui import QColor
 
 from .. import model as M
-from ..model import CLICK, KEY, MOVE, SCROLL, Event
+from .. import vision
+from ..model import CHECK, CLICK, KEY, MOVE, SCROLL, Event
 from . import theme
 
 COLS = ["#", "Time (s)", "Delay (s)", "Action", "X", "Y", "Details"]
 EDITABLE = {1, 2, 4, 5}
 
-KIND_NAMES = {MOVE: "Mouse move", CLICK: "Click", SCROLL: "Scroll", KEY: "Key"}
+KIND_NAMES = {MOVE: "Mouse move", CLICK: "Click", SCROLL: "Scroll", KEY: "Key", CHECK: "Checkpoint"}
+NO_POSITION = (KEY, CHECK)
 
 
 class EventTableModel(QAbstractTableModel):
     def __init__(self, apply: Callable[[List[Event], str], None]):
         super().__init__()
         self.events: List[Event] = []
+        self.checkpoints: dict = {}   # checkpoint id -> data, for the details column
         self.apply = apply
 
     def set_events(self, events):
@@ -43,7 +46,7 @@ class EventTableModel(QAbstractTableModel):
         f = Qt.ItemIsEnabled | Qt.ItemIsSelectable
         if index.column() in EDITABLE:
             e = self.events[index.row()]
-            if index.column() in (4, 5) and e.kind == KEY:
+            if index.column() in (4, 5) and e.kind in NO_POSITION:
                 return f
             f |= Qt.ItemIsEditable
         return f
@@ -68,14 +71,17 @@ class EventTableModel(QAbstractTableModel):
                     return f"Key {'down' if e.pressed else 'up'}"
                 return KIND_NAMES.get(e.kind, e.kind)
             if c == 4:
-                return "" if e.kind == KEY else e.x
+                return "" if e.kind in NO_POSITION else e.x
             if c == 5:
-                return "" if e.kind == KEY else e.y
+                return "" if e.kind in NO_POSITION else e.y
             if c == 6:
                 if e.kind == KEY:
                     return e.key_label
                 if e.kind == SCROLL:
                     return f"dx {e.dx}, dy {e.dy}"
+                if e.kind == CHECK:
+                    spec = self.checkpoints.get(e.ref)
+                    return f"{(spec or {}).get('name', '')}  ·  {vision.describe(spec)}"
                 return ""
         if role == Qt.ForegroundRole:
             if c == 3:

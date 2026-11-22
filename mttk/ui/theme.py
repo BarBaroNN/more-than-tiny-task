@@ -22,6 +22,7 @@ TRACK_COLORS = {
     "click": ORANGE,
     "scroll": CYAN,
     "key": PURPLE,
+    "check": GREEN,
 }
 
 STYLESHEET = f"""

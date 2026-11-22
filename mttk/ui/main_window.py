@@ -1,13 +1,14 @@
 """Main application window."""
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 from typing import List, Optional
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QUndoCommand, QUndoStack
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
                                QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
                                QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox,
                                QProgressBar, QSpinBox, QSplitter, QSystemTrayIcon, QTableView,
@@ -16,10 +17,13 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
 from .. import APP_NAME, __version__
 from .. import keys as K
 from .. import model as M
+from .. import notify
+from .. import vision as V
 from .. import winutil
-from ..model import MOVE, Event, Macro
+from ..model import CHECK, MOVE, Event, Macro
 from ..settings import Settings
 from . import icons, theme
+from .checkpoint_dialog import DELETE, CheckFailedDialog, CheckpointDialog
 from .event_table import EventFilter, EventTableModel
 from .osd import OSD
 from .settings_dialog import SettingsDialog
@@ -35,6 +39,9 @@ class Bridge(QObject):
     progress = Signal(int, int, float)
     waiting = Signal(float, int)
     finished = Signal(bool)
+    check_status = Signal(str, float, float, float)   # name, score, needed, seconds left
+    check_result = Signal(object)                     # vision.CheckResult
+    notified = Signal(bool, str)                      # phone alert sent?, error text
 
 
 class SetEventsCommand(QUndoCommand):
@@ -105,7 +112,15 @@ class MainWindow(QMainWindow):
         self._play_offset = 0.0
         self._resume_at = 0.0
         self._play_duration = 0.0
+        self._play_runs = 1
+        self._play_shift = (0, 0)
         self._was_visible = True
+        self._rec_checkpoints = {}   # checkpoints taken during the current recording
+        self._runner = None          # vision.CheckpointRunner while a macro with checkpoints plays
+        self._check_failure = None
+        self._fail_dialog = None
+        self._alert_text = ""
+        self._osd_note = ("", 0.0)   # short message shown instead of the REC timer
 
         self.undo = QUndoStack(self)
         self.undo.cleanChanged.connect(lambda _c: self._update_title())
@@ -114,6 +129,9 @@ class MainWindow(QMainWindow):
         self.bridge.progress.connect(self._on_progress)
         self.bridge.waiting.connect(self._on_waiting)
         self.bridge.finished.connect(self._on_play_finished)
+        self.bridge.check_status.connect(self._on_check_status)
+        self.bridge.check_result.connect(self._on_check_result)
+        self.bridge.notified.connect(self._on_notified)
         self.osd = OSD()
 
         self.setWindowIcon(icons.app_icon())
@@ -269,6 +287,27 @@ class MainWindow(QMainWindow):
         mv.addWidget(self.chk_adapt)
         prow.addWidget(mouse_opts)
 
+        safety = QWidget()
+        sv = QVBoxLayout(safety)
+        sv.setContentsMargins(0, 0, 0, 0)
+        sv.setSpacing(4)
+        lbl = QLabel("SAFETY")
+        lbl.setObjectName("CardTitle")
+        sv.addWidget(lbl)
+        self.chk_checks = QCheckBox("Screen checkpoints")
+        self.chk_checks.setChecked(s.checkpoints_enabled)
+        self.chk_checks.setToolTip("At each checkpoint (\u25c6 on the timeline) the macro pauses until the screen "
+                                   "looks like its picture.\nIf it doesn't within the wait time, the macro stops, "
+                                   "releases all keys and sends an alert.")
+        self.lbl_alerts = QLabel("")
+        self.lbl_alerts.setTextFormat(Qt.RichText)
+        self.lbl_alerts.setToolTip("Where alerts go when a checkpoint fails (Settings \u2192 Checkpoints & alerts)")
+        self.lbl_alerts.linkActivated.connect(lambda _l: self.open_settings("alerts"))
+        sv.addWidget(self.chk_checks)
+        sv.addWidget(self.lbl_alerts)
+        prow.addWidget(safety)
+        self._update_alerts_label()
+
         prog = QWidget()
         pv = QVBoxLayout(prog)
         pv.setContentsMargins(0, 0, 0, 0)
@@ -294,6 +333,7 @@ class MainWindow(QMainWindow):
         self.chk_infinite.toggled.connect(self._save_playback_options)
         self.chk_relative.toggled.connect(self._save_playback_options)
         self.chk_adapt.toggled.connect(self._save_playback_options)
+        self.chk_checks.toggled.connect(self._save_playback_options)
         self.chk_adapt.toggled.connect(lambda _on: self._update_screen_label())
         self.cmb_unit.currentTextChanged.connect(self._save_playback_options)
         root.addWidget(pb)
@@ -335,6 +375,8 @@ class MainWindow(QMainWindow):
         b.setStyleSheet(f"QToolButton {{ color: {theme.RED}; }}")
         ebtn("insertrec", "● Insert recording", "Get ready to record a new take inserted at the playhead; recording starts when you press the record key (Ctrl+I)",
              self.insert_recording)
+        b = ebtn("checkpoint", "\u25c6 Checkpoint", "", self.add_checkpoint_dialog)
+        b.setStyleSheet(f"QToolButton {{ color: {theme.GREEN}; }}")
         erow.addSpacing(6)
         more = QMenu(self)
         more.addAction("Insert pause at playhead…", self.insert_pause)
@@ -512,13 +554,12 @@ class MainWindow(QMainWindow):
         s.speed = self.spin_speed.value()
         s.relative_start = self.chk_relative.isChecked()
         s.adapt_resolution = self.chk_adapt.isChecked()
+        s.checkpoints_enabled = self.chk_checks.isChecked()
         s.save()
 
-    def open_settings(self):
-        if self.hotkeys:
-            self.hotkeys.enabled = False
-        dlg = SettingsDialog(self.settings, self)
-        try:
+    def open_settings(self, tab=""):
+        with self._hotkeys_paused():
+            dlg = SettingsDialog(self.settings, self, tab=tab if isinstance(tab, str) else "")
             if dlg.exec():
                 self.settings = dlg.result_settings()
                 self.settings.save()
@@ -526,9 +567,7 @@ class MainWindow(QMainWindow):
                 if self.hotkeys:
                     self.hotkeys.set_bindings(self.settings.hotkeys)
                 self._update_hotkey_hint()
-        finally:
-            if self.hotkeys:
-                self.hotkeys.enabled = True
+                self._update_alerts_label()
 
     def _update_hotkey_hint(self):
         hk = self.settings.hotkeys
@@ -536,7 +575,14 @@ class MainWindow(QMainWindow):
                  f"{K.format_hotkey(hk.get('play', ''))} play",
                  f"{K.format_hotkey(hk.get('stop', ''))} stop",
                  f"{K.format_hotkey(hk.get('center', ''))} centre mouse"]
+        if hk.get("checkpoint"):
+            parts.append(f"{K.format_hotkey(hk['checkpoint'])} checkpoint")
         self.sb_hotkeys.setText("   ·   ".join(parts))
+        cp = self._hk("checkpoint")
+        self._edit_buttons["checkpoint"].setToolTip(
+            "Add a screen checkpoint at the playhead: a picture of how the screen should look at that moment. "
+            "During playback the macro checks it and stops (with an alert) if the screen looks wrong."
+            + (f"\n{cp} adds one straight away, also while recording." if cp else ""))
 
     def _hk(self, action):
         return K.format_hotkey(self.settings.hotkeys.get(action, ""))
@@ -561,6 +607,8 @@ class MainWindow(QMainWindow):
         """
         if action == "stop":
             return self.state == PLAYING
+        if action == "checkpoint":
+            return self.state in (IDLE, RECORDING)
         return True
 
     def _on_hotkey(self, action: str):
@@ -590,15 +638,24 @@ class MainWindow(QMainWindow):
                 self._cancel_countdown()
         elif action == "center":
             self.center_mouse()
+        elif action == "checkpoint":
+            self.hotkey_checkpoint()
 
     # ============================================================ events
     def _set_events(self, events):
         self.events = list(events)
+        cps = self._checkpoints()
+        self.timeline.set_checkpoint_info(cps)
         self.timeline.set_events(self.events)
+        self.table_model.checkpoints = cps
         self.table_model.set_events(self.events)
         n = len(self.events)
         moves = sum(1 for e in self.events if e.kind == MOVE)
-        self.sb_events.setText(f"{n:,} events ({n - moves:,} actions, {moves:,} moves)")
+        checks = sum(1 for e in self.events if e.kind == CHECK)
+        txt = f"{n:,} events ({n - moves - checks:,} actions, {moves:,} moves)"
+        if checks:
+            txt += f"  \u00b7  {checks} checkpoint{'s' if checks != 1 else ''}"
+        self.sb_events.setText(txt)
         self.sb_duration.setText(f"Length {fmt_time(M.duration(self.events), 2)}")
         self._update_screen_label()
         self._update_time_label()
@@ -638,11 +695,13 @@ class MainWindow(QMainWindow):
         events = self._to_current_screen(events)
         if first_run is not None:
             first_run = self._to_current_screen(first_run)
+        self._play_shift = (0, 0)
         if self.chk_relative.isChecked():
             start = M.first_position(first_run if first_run is not None else events)
             if start:
                 cx, cy = winutil.cursor_pos()
                 dx, dy = cx - start[0], cy - start[1]
+                self._play_shift = (dx, dy)  # checkpoint areas move with the mouse positions
                 events = M.offset_events(events, dx, dy)
                 if first_run is not None:
                     first_run = M.offset_events(first_run, dx, dy)
@@ -668,7 +727,7 @@ class MainWindow(QMainWindow):
         self.btn_play.setEnabled((idle and has) or self.state == PLAYING)
         self.btn_stop.setEnabled(not idle)
         for w in (self.spin_repeat, self.chk_infinite, self.spin_delay, self.cmb_unit, self.spin_speed,
-                  self.chk_relative, self.chk_adapt):
+                  self.chk_relative, self.chk_adapt, self.chk_checks):
             w.setEnabled(idle)
         if idle:
             self.spin_repeat.setEnabled(not self.chk_infinite.isChecked())
@@ -681,6 +740,7 @@ class MainWindow(QMainWindow):
         b["delete"].setEnabled(idle and (sel or bool(self.timeline.selected)))
         b["rerecord"].setEnabled(idle and sel)
         b["insertrec"].setEnabled(idle)
+        b["checkpoint"].setEnabled(idle)
         b["playsel"].setEnabled(idle and sel)
         if idle:
             self._update_play_hint()
@@ -768,6 +828,9 @@ class MainWindow(QMainWindow):
         self._update_state_ui()
 
     def _focus_event_row(self, index):
+        if self.events[index].kind == CHECK:
+            self.edit_checkpoint(index)
+            return
         if self.events[index].kind == MOVE and not self.chk_moves.isChecked():
             self.chk_moves.setChecked(True)
         self._on_timeline_events_selected([index])
@@ -782,7 +845,11 @@ class MainWindow(QMainWindow):
         if not sel or self.state != IDLE:
             return
         a, b = sel
-        self.clipboard = (M.slice_range(self.events, a, b), b - a)
+        clip = M.slice_range(self.events, a, b)
+        cps = self._checkpoints()
+        # checkpoint pictures travel with the clip, so pasting into another macro keeps them
+        specs = {r: cps[r] for r in M.checkpoint_refs(clip) if r in cps}
+        self.clipboard = (clip, b - a, specs)
         self.lbl_status.setText(f"Copied {b - a:.2f}s")
         self._update_state_ui()
 
@@ -799,9 +866,10 @@ class MainWindow(QMainWindow):
     def paste(self):
         if not self.clipboard or self.state != IDLE:
             return
-        clip, length = self.clipboard
+        clip, length, specs = self.clipboard
         t = self.timeline.playhead
-        self.apply_edit(M.insert_at(self.events, t, clip, length), "Paste")
+        self.apply_edit(M.insert_at(self.events, t, clip, length), "Paste",
+                        M.with_checkpoints(self.meta, specs) if specs else None)
         self.timeline.set_selection((t, t + length))
 
     def delete(self):
@@ -885,6 +953,8 @@ class MainWindow(QMainWindow):
         m.addAction("Insert recording here", lambda: (self.timeline.set_playhead(t, emit=True),
                                                       self.insert_recording()))
         m.addAction("Insert pause here…", lambda: (self.timeline.set_playhead(t, emit=True), self.insert_pause()))
+        m.addAction("\u25c6 Add checkpoint here…", lambda: (self.timeline.set_playhead(t, emit=True),
+                                                            self.add_checkpoint_dialog()))
         m.addSeparator()
         a = m.addAction("Preview selection", self.play_selection)
         a.setEnabled(bool(sel))
@@ -1012,6 +1082,8 @@ class MainWindow(QMainWindow):
         self.recorder = Recorder(record_moves=s.record_mouse_moves, move_interval=s.move_interval_ms / 1000,
                                  record_keyboard=s.record_keyboard, record_mouse=s.record_mouse,
                                  ignore_key=self._recording_ignored_keys())
+        self._rec_checkpoints = {}
+        self._osd_note = ("", 0.0)
         self.recorder.start()
         self.state = RECORDING
         ctx = self._rec_ctx
@@ -1033,7 +1105,7 @@ class MainWindow(QMainWindow):
         The stop key is not one of them, so e.g. Esc is recorded like any other key."""
         if not self.hotkeys:
             return None
-        keys = frozenset(self.hotkeys.keys_for(("record", "play", "center")))
+        keys = frozenset(self.hotkeys.keys_for(("record", "play", "center", "checkpoint")))
         return lambda name: name in keys
 
     def _tick_recording(self):
@@ -1041,6 +1113,12 @@ class MainWindow(QMainWindow):
             return
         el = self.recorder.elapsed()
         self.lbl_time.setText(fmt_time(el, 1))
+        note, until = self._osd_note
+        if note and time.time() < until:
+            self.lbl_status.setText(note)
+            if self.settings.show_osd:
+                self.osd.show_message(note, theme.GREEN)
+            return
         msg = f"{self._rec_desc}  {fmt_time(el, 1)}  ·  {self.recorder.event_count()} events  ·  {self._hk('record')} to stop"
         self.lbl_status.setText(msg)
         if self.settings.show_osd:
@@ -1066,6 +1144,9 @@ class MainWindow(QMainWindow):
         elif current and self._macro_screen() != list(current):
             # a take recorded on another resolution: store it in the macro's coordinates
             clip = M.scale_events(clip, current, self._macro_screen())
+        if self._rec_checkpoints:
+            meta = M.with_checkpoints(meta, self._rec_checkpoints)
+            self._rec_checkpoints = {}
         if ctx["mode"] == "new":
             if clip:
                 self.apply_edit(clip, "Record", meta)
@@ -1137,15 +1218,33 @@ class MainWindow(QMainWindow):
         first_run = M.resume_from(events, self._resume_at) if self._resume_at else None
         b = self.bridge
         events, first_run = self._prepare_for_playback(events, first_run)
+        self._runner = None
+        self._check_failure = None
+        on_check = None
+        refs = M.checkpoint_refs(events) | M.checkpoint_refs(first_run or [])
+        if refs and self.chk_checks.isChecked():
+            runner = V.CheckpointRunner(self._checkpoints(), to_screen=self._playback_to_screen,
+                                        on_status=b.check_status.emit, on_result=b.check_result.emit)
+            runner.prepare(refs)  # checkpoints without a picture are skipped (shown red on the timeline)
+            offset, resume_at = self._play_offset, self._resume_at
+
+            def check_at(e, run):  # player thread
+                return runner.check(e.ref, run, offset + e.t + (resume_at if run == 1 else 0.0))
+            self._runner, on_check = runner, check_at
         self.player = Player(events, repeats=repeats, delay=delay, speed=self.spin_speed.value(),
                              release_on_stop=s.release_keys_on_stop,
                              on_progress=b.progress.emit, on_wait=b.waiting.emit, on_finished=b.finished.emit,
-                             first_run=first_run, mouse_mode=s.mouse_move_mode)
+                             first_run=first_run, mouse_mode=s.mouse_move_mode, on_check=on_check)
+        if self._runner:
+            self._runner.cancel = self.player.stop_event
+            self._exclude_us_from_capture(True)
         self.state = PLAYING
         self._play_started = time.time()
         self._last_run = 0
         if s.hide_while_playing and not preview:
             self._hide_for_task()
+        if self._runner:
+            time.sleep(0.1)  # let Windows apply the screenshot exclusion before the first check
         self.player.start()
         self._update_state_ui()
 
@@ -1181,12 +1280,29 @@ class MainWindow(QMainWindow):
     def _on_play_finished(self, completed: bool):
         self.player = None
         self.state = IDLE
+        if self._runner:
+            self._runner = None
+            self._exclude_us_from_capture(False)
+        failure, self._check_failure = self._check_failure, None
         self.osd.hide()
         self._restore_after_task()
         runs = self._last_run
         self.lbl_status.setText(f"Finished {runs:,} run(s)" if completed else f"Stopped during run {runs:,}")
         self.progress.setValue(1000 if completed else self.progress.value())
         self._update_state_ui()
+        if failure:
+            self.lbl_status.setText(f"\u25a0 Stopped at checkpoint \u201c{failure.name}\u201d: {failure.summary}")
+            self.lbl_run.setText(f"<span style='color:{theme.RED}'>Checkpoint failed in run {failure.run:,}</span>")
+            if self.settings.show_osd:
+                self.osd.show_message(f"STOPPED  \u00b7  checkpoint \u201c{failure.name}\u201d failed", theme.RED,
+                                      hide_after_ms=8000)
+            self._show_failure(failure)
+        elif completed and self.settings.notify_on_finish:
+            cfg = notify.config_from_settings(self.settings)
+            if notify.enabled(cfg):
+                name = os.path.basename(self.file_path) if self.file_path else "The macro"
+                notify.send_async(cfg, "Macro finished", f"{name} finished {runs:,} run(s).", priority="default",
+                                  tags="white_check_mark", on_done=self.bridge.notified.emit)
 
     def stop_playback(self):
         if self.player:
@@ -1199,6 +1315,238 @@ class MainWindow(QMainWindow):
             self.stop_recording(via_ui=via_ui)
         elif self.state in (COUNTDOWN, ARMED):
             self._cancel_countdown()
+
+    # ======================================================= checkpoints
+    def _checkpoints(self) -> dict:
+        return M.checkpoints_of(self.meta)
+
+    def _next_checkpoint_name(self) -> str:
+        n = sum(1 for e in self.events if e.kind == CHECK) + len(self._rec_checkpoints) + 1
+        return f"Checkpoint {n}"
+
+    @contextlib.contextmanager
+    def _hotkeys_paused(self):
+        if self.hotkeys:
+            self.hotkeys.enabled = False
+        try:
+            yield
+        finally:
+            if self.hotkeys:
+                self.hotkeys.enabled = True
+
+    def _grab_without_us(self, rect):
+        """Screenshot of ``rect`` with our own windows (this window, dialogs,
+        the indicator) left out, so they never end up in a checkpoint."""
+        hidden = []
+        for w in QApplication.topLevelWidgets():
+            if w.isVisible() and winutil.set_exclude_from_capture(int(w.winId()), True):
+                hidden.append(w)
+        if hidden:
+            time.sleep(0.12)  # give Windows a frame or two to redraw without them
+        try:
+            return V.grab(rect)
+        finally:
+            for w in hidden:
+                winutil.set_exclude_from_capture(int(w.winId()), False)
+
+    def _exclude_us_from_capture(self, on: bool):
+        """While a macro with checkpoints plays, keep this window and the
+        indicator out of the screenshots it compares."""
+        winutil.set_exclude_from_capture(int(self.winId()), on)
+        self.osd.exclude_from_capture(on)
+
+    def _take_checkpoint_picture(self, near=None):
+        """Screenshot of the whole monitor at ``near`` (default: the mouse pointer)."""
+        x, y = near or winutil.cursor_pos()
+        mon = winutil.monitor_rect_at(x, y)
+        img = self._grab_without_us(mon) if mon else None
+        if img is None or img.isNull():
+            return None, None
+        return img, mon
+
+    def _new_checkpoint_spec(self, img, mon) -> dict:
+        s = self.settings
+        return V.new_checkpoint(img, mon, winutil.primary_screen_rect(), self._next_checkpoint_name(),
+                                s.checkpoint_threshold, s.checkpoint_timeout)
+
+    def _checkpoint_to_screen(self, rect, screen):
+        """A checkpoint area on this screen, rescaled like mouse positions."""
+        if self.chk_adapt.isChecked():
+            return V.scale_rect(rect, screen, winutil.primary_screen_rect())
+        return list(rect)
+
+    def _playback_to_screen(self, rect, screen):
+        r = self._checkpoint_to_screen(rect, screen)
+        dx, dy = self._play_shift
+        return [r[0] + dx, r[1] + dy, r[2], r[3]]
+
+    def _note(self, text: str, color: str = theme.GREEN, ms: int = 3000):
+        """A short message in the status line and the on-screen indicator."""
+        self.lbl_status.setText(text)
+        self._osd_note = (text, time.time() + ms / 1000)
+        if self.state == RECORDING:
+            self._tick_recording()
+        elif self.settings.show_osd:
+            self.osd.show_message(text, color, hide_after_ms=ms)
+
+    def hotkey_checkpoint(self):
+        """Checkpoint key: save the screen as it is now. While recording, at the
+        current moment of the recording; otherwise at the playhead."""
+        if self.state not in (RECORDING, IDLE):
+            return
+        img, mon = self._take_checkpoint_picture()
+        if img is None:
+            self._note("Couldn't take a screenshot for the checkpoint", theme.RED)
+            return
+        ref = V.new_id()
+        spec = self._new_checkpoint_spec(img, mon)
+        if self.state == RECORDING and self.recorder:
+            self._rec_checkpoints[ref] = spec
+            t = self.recorder.add_checkpoint(ref)
+            self._note(f"\u25c6 {spec['name']} saved at {fmt_time(t, 1)}")
+        elif self.state == IDLE:
+            t = self.timeline.playhead
+            self.apply_edit(M.add_event(self.events, Event(t, CHECK, ref=ref)), "Add checkpoint",
+                            M.with_checkpoints(self.meta, {ref: spec}))
+            self._note(f"\u25c6 {spec['name']} added at {fmt_time(t, 2)}  \u00b7  double-click it on the "
+                       "timeline to choose the area")
+
+    def add_checkpoint_dialog(self, *_):
+        """Button / menu: picture of the screen now, edited before it's added at the playhead."""
+        if self.state != IDLE:
+            return
+        t = self.timeline.playhead
+        near = None
+        pos = M.cursor_position_at(self.events, t)
+        if pos:  # the monitor the macro is working on at that moment
+            p = self._to_current_screen([Event(0.0, MOVE, x=pos[0], y=pos[1])])[0]
+            near = (p.x, p.y)
+        img, mon = self._take_checkpoint_picture(near)
+        if img is None:
+            QMessageBox.warning(self, APP_NAME, "Couldn't take a screenshot.")
+            return
+        with self._hotkeys_paused():
+            dlg = CheckpointDialog(self._new_checkpoint_spec(img, mon), t, self._grab_without_us,
+                                   self._checkpoint_to_screen, self, is_new=True)
+            if dlg.exec() != QDialog.Accepted:
+                return
+        ref = V.new_id()
+        self.apply_edit(M.add_event(self.events, Event(t, CHECK, ref=ref)), "Add checkpoint",
+                        M.with_checkpoints(self.meta, {ref: dlg.result_spec()}))
+        self.lbl_status.setText(f"Checkpoint added at {fmt_time(t, 2)}")
+
+    def edit_checkpoint(self, index: int):
+        if self.state != IDLE or not 0 <= index < len(self.events) or self.events[index].kind != CHECK:
+            return
+        e = self.events[index]
+        spec = self._checkpoints().get(e.ref)
+        if not spec:
+            r = QMessageBox.question(self, APP_NAME, "This checkpoint has no picture (it may have been pasted "
+                                     "from another macro). Delete it?")
+            if r == QMessageBox.Yes:
+                self.apply_edit(M.delete_indices(self.events, [index]), "Delete checkpoint")
+            return
+        with self._hotkeys_paused():
+            dlg = CheckpointDialog(spec, e.t, self._grab_without_us, self._checkpoint_to_screen, self)
+            r = dlg.exec()
+        if r == DELETE:
+            self.apply_edit(M.delete_indices(self.events, [index]), "Delete checkpoint")
+            self.timeline.select_events([])
+        elif r == QDialog.Accepted:
+            self.apply_edit(self.events, "Edit checkpoint", M.with_checkpoints(self.meta, {e.ref: dlg.result_spec()}))
+
+    def _checkpoint_index(self, ref: str, t: float) -> Optional[int]:
+        found = [i for i, e in enumerate(self.events) if e.kind == CHECK and e.ref == ref]
+        return min(found, key=lambda i: abs(self.events[i].t - t)) if found else None
+
+    def _show_checkpoint(self, ref: str, t: float):
+        i = self._checkpoint_index(ref, t)
+        if i is not None:
+            self.timeline.set_selection(None)
+            self.timeline.select_events([i], emit=True)
+            self.timeline.set_playhead(self.events[i].t, follow=True, emit=True)
+        self._restore_window()
+
+    def _edit_checkpoint_ref(self, ref: str, t: float):
+        i = self._checkpoint_index(ref, t)
+        if i is not None:
+            self.edit_checkpoint(i)
+
+    # -------------------------------------------------- during playback
+    def _on_check_status(self, name, score, needed, left):
+        if self.state != PLAYING:
+            return
+        txt = f"Checking \u201c{name}\u201d: {score * 100:.0f}% (needs {needed * 100:.0f}%), waiting {left:.1f}s more"
+        self.lbl_status.setText(txt + f"  \u00b7  {self._hk('stop')} to stop")
+        if self.settings.show_osd:
+            self.osd.show_message(f"CHECK  {txt}", theme.YELLOW)
+
+    def _on_check_result(self, res):
+        if res.passed:
+            return
+        self._check_failure = res
+        self._alert_failure(res)
+
+    def _failure_when(self, res) -> str:
+        total = self._play_runs
+        runs = "\u221e" if total == 0 else f"{total:,}"
+        where = f"Run {res.run:,} of {runs}, {fmt_time(res.t, 2)} into the macro"
+        if self.file_path:
+            where += f" ({os.path.basename(self.file_path)})"
+        return where
+
+    def _alert_failure(self, res):
+        """Sound, tray balloon and phone alert, as soon as a checkpoint fails."""
+        QApplication.beep()
+        title = f"Macro stopped: {res.name}"
+        msg = f"{res.summary}.\n{self._failure_when(res)}."
+        if self.tray.isVisible():
+            self.tray.showMessage(title, msg, QSystemTrayIcon.Warning, 15000)
+        cfg = notify.config_from_settings(self.settings)
+        if not notify.enabled(cfg):
+            self._alert_text = "Phone alerts are off. Set them up in Settings \u2192 Checkpoints & alerts."
+            return
+        image = b""
+        if self.settings.notify_attach_screenshot:
+            img = res.screenshot if res.screenshot is not None else res.actual
+            try:
+                image = V.image_bytes(img)
+            except Exception:
+                image = b""
+        self._alert_text = "Sending phone alert\u2026"
+        notify.send_async(cfg, title, msg, image, priority="high", tags="warning",
+                          on_done=self.bridge.notified.emit)
+
+    def _on_notified(self, ok: bool, error: str):
+        self._alert_text = "\u2713 Phone alert sent." if ok else f"\u26a0 Phone alert failed: {error}"
+        if self._fail_dialog is not None:
+            self._fail_dialog.set_alert_text(self._alert_text)
+        if not ok:
+            self.sb_screen.setText(self._alert_text)
+
+    def _show_failure(self, res):
+        if self._fail_dialog is not None:
+            self._fail_dialog.close()
+        dlg = CheckFailedDialog(res, self._failure_when(res), self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.set_alert_text(self._alert_text)
+        dlg.showOnTimeline.connect(lambda: self._show_checkpoint(res.ref, res.t))
+        dlg.editCheckpoint.connect(lambda: self._edit_checkpoint_ref(res.ref, res.t))
+        dlg.destroyed.connect(lambda *_: setattr(self, "_fail_dialog", None))
+        self._fail_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _update_alerts_label(self):
+        cfg = notify.config_from_settings(self.settings)
+        if cfg["service"] == "none":
+            text, color = "Phone alerts: off", theme.TEXT_FAINT
+        elif notify.problem(cfg):
+            text, color = "Phone alerts: not set up", theme.YELLOW
+        else:
+            text, color = f"Phone alerts: {cfg['service']} \u2713", theme.TEXT_DIM
+        self.lbl_alerts.setText(f"<a href='alerts' style='color:{color}; text-decoration:none'>{text}</a>")
 
     # =========================================================== centring
     def center_mouse(self):

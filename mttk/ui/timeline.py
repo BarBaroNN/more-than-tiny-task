@@ -1,6 +1,6 @@
 """Video-editor style timeline for a macro.
 
-Tracks: mouse path (X/Y graph), clicks, scroll and keys. Supports zooming,
+Tracks: mouse path (X/Y graph), clicks, scroll, keys and screen checkpoints. Supports zooming,
 scrolling, range selection with draggable edges, a draggable playhead,
 selecting events and dragging them in time.
 """
@@ -15,7 +15,8 @@ from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QLinearGradient,
                            QPainter, QPainterPath, QPen, QPolygonF)
 from PySide6.QtWidgets import QScrollBar, QToolTip, QWidget
 
-from ..model import CLICK, KEY, MOVE, SCROLL, Event
+from .. import vision
+from ..model import CHECK, CLICK, KEY, MOVE, SCROLL, Event
 from . import theme
 
 
@@ -70,6 +71,8 @@ class Timeline(QWidget):
         self._click_bars: List[Bar] = []
         self._key_bars: List[Bar] = []
         self._scroll_idx: List[int] = []
+        self._check_idx: List[int] = []
+        self.check_info: dict = {}   # checkpoint id -> data (name, settings)
         self._key_lanes = 1
         self._xbounds = (0, 1)
         self._ybounds = (0, 1)
@@ -104,6 +107,10 @@ class Timeline(QWidget):
         self._update_scrollbar()
         self.update()
 
+    def set_checkpoint_info(self, info: dict) -> None:
+        self.check_info = dict(info or {})
+        self.update()
+
     def duration(self) -> float:
         return self._times[-1] if self._times else 0.0
 
@@ -112,6 +119,7 @@ class Timeline(QWidget):
         self._move_idx = [i for i, e in enumerate(ev) if e.kind == MOVE]
         self._move_times = [ev[i].t for i in self._move_idx]
         self._scroll_idx = [i for i, e in enumerate(ev) if e.kind == SCROLL]
+        self._check_idx = [i for i, e in enumerate(ev) if e.kind == CHECK]
         xs = [e.x for e in ev if e.kind in (MOVE, CLICK, SCROLL)]
         ys = [e.y for e in ev if e.kind in (MOVE, CLICK, SCROLL)]
         self._xbounds = (min(xs), max(xs)) if xs else (0, 1)
@@ -171,7 +179,7 @@ class Timeline(QWidget):
     def _layout_tracks(self) -> None:
         key_h = max(34, self._key_lanes * 18 + 10)
         spec = [("Mouse path", MOVE, 58), ("Clicks", CLICK, 34),
-                ("Scroll", SCROLL, 26), ("Keys", KEY, key_h)]
+                ("Scroll", SCROLL, 26), ("Keys", KEY, key_h), ("Checks", CHECK, 30)]
         y = self.RULER_H
         self._tracks = []
         for name, kind, h in spec:
@@ -337,6 +345,7 @@ class Timeline(QWidget):
         self._paint_bars(p, self._click_bars, CLICK, t_a, t_b)
         self._paint_scrolls(p, t_a, t_b)
         self._paint_bars(p, self._key_bars, KEY, t_a, t_b)
+        self._paint_checks(p, t_a, t_b)
         p.restore()
 
         self._paint_ruler(p, t_a, t_b, step, minor)
@@ -552,6 +561,44 @@ class Timeline(QWidget):
             p.setBrush(color)
             p.drawPolygon(tri)
 
+    def _check_name(self, e: Event) -> str:
+        spec = self.check_info.get(e.ref)
+        return (spec or {}).get("name") or ("Missing picture" if not spec else "Checkpoint")
+
+    def _paint_checks(self, p, t_a, t_b):
+        if not self._check_idx:
+            return
+        y0, h = self._track(CHECK)
+        cy = y0 + h / 2
+        drag_dt = self._drag.get("dt", 0.0) if self._drag and self._drag.get("type") == "move_events" else 0.0
+        fm = QFontMetrics(self._small)
+        p.setFont(self._small)
+        xs = []
+        for idx in self._check_idx:
+            e = self.events[idx]
+            t = e.t + (drag_dt if idx in self.selected else 0.0)
+            xs.append((self.t_to_x(t), idx, e))
+        for n, (x, idx, e) in enumerate(xs):
+            if x < self.HEADER_W - 200 or x > self.width() + 10:
+                continue
+            ok = e.ref in self.check_info
+            color = QColor(theme.TRACK_COLORS[CHECK] if ok else theme.RED)
+            line = QColor(color)
+            line.setAlpha(70)
+            p.setPen(QPen(line, 1, Qt.DashLine))
+            p.drawLine(QPointF(x, self.RULER_H), QPointF(x, y0))
+            diamond = QPolygonF([QPointF(x, cy - 7), QPointF(x + 7, cy), QPointF(x, cy + 7), QPointF(x - 7, cy)])
+            selected = idx in self.selected
+            p.setPen(QPen(QColor("white"), 1.5) if selected else QPen(color.darker(150), 1))
+            p.setBrush(color)
+            p.drawPolygon(diamond)
+            label = self._check_name(e)
+            room = (xs[n + 1][0] if n + 1 < len(xs) else self.width()) - x - 14
+            if room > 24:
+                p.setPen(QColor(theme.TEXT_DIM if ok else theme.RED))
+                p.drawText(QRectF(x + 11, y0, room, h), Qt.AlignVCenter | Qt.AlignLeft,
+                           fm.elidedText(label, Qt.ElideRight, int(room)))
+
     def _paint_overlay(self, p):
         rect = QRectF(self.HEADER_W, self.RULER_H, self.track_width(), self._content_bottom - self.RULER_H)
         if self.overlay_text:
@@ -582,6 +629,10 @@ class Timeline(QWidget):
         elif kind == SCROLL:
             for idx in self._scroll_idx:
                 if abs(self.t_to_x(self.events[idx].t) - pos.x()) <= 6:
+                    return (idx,)
+        elif kind == CHECK:
+            for idx in reversed(self._check_idx):
+                if abs(self.t_to_x(self.events[idx].t) - pos.x()) <= 8:
                     return (idx,)
         elif kind == MOVE and self._move_idx:
             t = self.x_to_t(pos.x())
@@ -673,7 +724,12 @@ class Timeline(QWidget):
                     tip = f"{a.describe()}\nheld {b.t - a.t:.3f}s  ·  at {fmt_time(a.t, 3)}"
                 else:
                     ev = self.events[hit[0]]
-                    tip = f"{ev.describe()}\nat {fmt_time(ev.t, 3)}"
+                    if ev.kind == CHECK:
+                        spec = self.check_info.get(ev.ref)
+                        tip = (f"◆ {self._check_name(ev)}\n{vision.describe(spec)}\nat {fmt_time(ev.t, 3)}"
+                               "  ·  double-click to edit")
+                    else:
+                        tip = f"{ev.describe()}\nat {fmt_time(ev.t, 3)}"
                 QToolTip.showText(e.globalPosition().toPoint(), tip, self)
             else:
                 self.unsetCursor()

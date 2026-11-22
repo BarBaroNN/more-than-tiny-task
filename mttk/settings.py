@@ -9,6 +9,7 @@ DEFAULT_HOTKEYS = {
     "play": "f9",
     "center": "f10",
     "stop": "esc",
+    "checkpoint": "f7",
 }
 
 HOTKEY_LABELS = {
@@ -16,6 +17,7 @@ HOTKEY_LABELS = {
     "play": "Play / stop",
     "center": "Centre mouse",
     "stop": "Stop playback",
+    "checkpoint": "Add checkpoint",
 }
 
 
@@ -48,6 +50,20 @@ class Settings:
     relative_start: bool = False      # start from the current cursor position
     adapt_resolution: bool = True     # rescale mouse positions to this screen
     mouse_move_mode: str = "relative"  # 'relative' (like a mouse), 'absolute' (TinyTask) or 'set'
+    # screen checkpoints
+    checkpoints_enabled: bool = True   # check the screen at checkpoints during playback
+    checkpoint_threshold: int = 80     # default % match for new checkpoints
+    checkpoint_timeout: float = 5.0    # default seconds to wait for a match
+    # phone alerts
+    notify_service: str = "none"       # 'none', 'ntfy', 'telegram' or 'discord'
+    ntfy_server: str = "https://ntfy.sh"
+    ntfy_topic: str = ""
+    ntfy_token: str = ""
+    telegram_token: str = ""
+    telegram_chat_id: str = ""
+    discord_webhook: str = ""
+    notify_attach_screenshot: bool = True
+    notify_on_finish: bool = False
     # mouse centring
     center_target: str = "cursor"  # 'cursor' or 'primary'
     center_duration_ms: int = 350

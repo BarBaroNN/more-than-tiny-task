@@ -206,3 +206,112 @@ def move_mouse(x: int, y: int, mode: str = MOUSE_RELATIVE) -> bool:
         _user32.mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny, 0, 0)
     _user32.SetCursorPos(x, y)
     return True
+
+
+# ------------------------------------------------------------ screen capture
+# Plain GDI, so it works from any thread (the player checks the screen from
+# its own thread, where Qt's QScreen.grabWindow can't be used).
+
+def monitor_rect_at(x: int, y: int):
+    """(left, top, width, height) of the monitor containing (x, y)."""
+    if IS_WINDOWS:
+        try:
+            mon = _user32.MonitorFromPoint(wintypes.POINT(int(x), int(y)), 2)  # MONITOR_DEFAULTTONEAREST
+            info = _MONITORINFO()
+            info.cbSize = ctypes.sizeof(_MONITORINFO)
+            if _user32.GetMonitorInfoW(mon, ctypes.byref(info)):
+                r = info.rcMonitor
+                return [r.left, r.top, r.right - r.left, r.bottom - r.top]
+        except Exception:
+            pass
+    return primary_screen_rect()
+
+
+if IS_WINDOWS:
+    _gdi32 = ctypes.windll.gdi32
+
+    class _BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+                    ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD),
+                    ("biCompression", wintypes.DWORD), ("biSizeImage", wintypes.DWORD),
+                    ("biXPelsPerMeter", wintypes.LONG), ("biYPelsPerMeter", wintypes.LONG),
+                    ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD)]
+
+    _user32.GetDC.argtypes = [wintypes.HWND]
+    _user32.GetDC.restype = wintypes.HDC
+    _user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+    _gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+    _gdi32.CreateCompatibleDC.restype = wintypes.HDC
+    _gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+    _gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+    _gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+    _gdi32.SelectObject.restype = wintypes.HGDIOBJ
+    _gdi32.BitBlt.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                              wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.DWORD]
+    _gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT,
+                                 ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+    _gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+    _gdi32.DeleteDC.argtypes = [wintypes.HDC]
+    _user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
+    _user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
+
+
+def grab_screen(left: int, top: int, width: int, height: int):
+    """Screenshot of a rectangle of the desktop (physical pixels, any monitor)
+    as ``(bgra_bytes, width, height)``, or None. Parts outside every monitor
+    come back black. The mouse pointer is not included."""
+    if not IS_WINDOWS or width <= 0 or height <= 0:
+        return None
+    screen_dc = _user32.GetDC(None)
+    if not screen_dc:
+        return None
+    mem_dc = bmp = old = None
+    try:
+        mem_dc = _gdi32.CreateCompatibleDC(screen_dc)
+        bmp = _gdi32.CreateCompatibleBitmap(screen_dc, width, height)
+        if not mem_dc or not bmp:
+            return None
+        old = _gdi32.SelectObject(mem_dc, bmp)
+        if not _gdi32.BitBlt(mem_dc, 0, 0, width, height, screen_dc, int(left), int(top), 0x00CC0020):  # SRCCOPY
+            return None
+        _gdi32.SelectObject(mem_dc, old)
+        old = None
+        bi = _BITMAPINFOHEADER()
+        bi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+        bi.biWidth = width
+        bi.biHeight = -height  # top-down rows
+        bi.biPlanes = 1
+        bi.biBitCount = 32
+        buf = ctypes.create_string_buffer(width * height * 4)
+        if not _gdi32.GetDIBits(mem_dc, bmp, 0, height, buf, ctypes.byref(bi), 0):  # DIB_RGB_COLORS
+            return None
+        return buf.raw, width, height
+    finally:
+        if old:
+            _gdi32.SelectObject(mem_dc, old)
+        if bmp:
+            _gdi32.DeleteObject(bmp)
+        if mem_dc:
+            _gdi32.DeleteDC(mem_dc)
+        _user32.ReleaseDC(None, screen_dc)
+
+
+def can_exclude_from_capture() -> bool:
+    """WDA_EXCLUDEFROMCAPTURE needs Windows 10 2004 (build 19041) or newer."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        return sys.getwindowsversion().build >= 19041
+    except Exception:
+        return False
+
+
+def set_exclude_from_capture(hwnd: int, on: bool) -> bool:
+    """Leave a window out of screenshots (it stays visible on screen), so our
+    own window and indicator never end up in checkpoint pictures."""
+    if not can_exclude_from_capture() or not hwnd:
+        return False
+    try:
+        return bool(_user32.SetWindowDisplayAffinity(int(hwnd), 0x11 if on else 0))
+    except Exception:
+        return False

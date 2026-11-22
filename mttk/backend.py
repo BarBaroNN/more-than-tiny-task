@@ -14,7 +14,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 
 from . import keys as K
 from . import winutil
-from .model import CLICK, KEY, MOVE, SCROLL, Event, sanitize_recording
+from .model import CHECK, CLICK, KEY, MOVE, SCROLL, Event, sanitize_recording
 
 
 def _injected(args) -> bool:
@@ -215,6 +215,13 @@ class Recorder:
         events = sanitize_recording(events)
         return events, length
 
+    def add_checkpoint(self, ref: str) -> float:
+        """Mark a screen checkpoint at the current recording time."""
+        t = self._now()
+        if self.running:
+            self._add(Event(t, CHECK, ref=ref))
+        return t
+
     def add_synthetic_move(self, x: int, y: int) -> None:
         """Used for the animated centring so it ends up in the recording."""
         if self.running and self.record_mouse:
@@ -312,6 +319,13 @@ class Player:
       on_progress(run_index, total_runs, t_seconds)
       on_wait(seconds_remaining, next_run_index)
       on_finished(completed: bool)
+      on_check(event, run_index) -> bool   (screen checkpoints, optional)
+
+    At a checkpoint event, playback waits for ``on_check``; the time it takes
+    is added to everything after it, so a slow check (or waiting for a laggy
+    screen to catch up) doesn't make later events run early. When it returns
+    False, playback stops and ``check_failed`` is set. Without ``on_check``,
+    checkpoints are skipped.
 
     ``first_run`` (optional) is played instead of ``events`` on the first run
     only, e.g. to continue from the middle and then loop the whole macro.
@@ -323,8 +337,10 @@ class Player:
                  speed: float = 1.0, release_on_stop: bool = True,
                  on_progress=None, on_wait=None, on_finished=None,
                  first_run: Optional[Sequence[Event]] = None,
-                 mouse_mode: str = winutil.MOUSE_RELATIVE):
+                 mouse_mode: str = winutil.MOUSE_RELATIVE, on_check=None):
         self.events = list(events)
+        self.on_check = on_check
+        self.check_failed = False
         self.mouse_mode = mouse_mode
         self.first_run = list(first_run) if first_run is not None else None
         self.repeats = max(0, int(repeats))  # 0 = forever
@@ -346,6 +362,10 @@ class Player:
 
     def stop(self) -> None:
         self._stop.set()
+
+    @property
+    def stop_event(self) -> threading.Event:
+        return self._stop
 
     @property
     def running(self) -> bool:
@@ -397,6 +417,24 @@ class Player:
                 elapsed = (time.perf_counter() - start) * self.speed
                 self.on_progress(run, self.repeats, stop_position(elapsed, done_t, e.t))
                 return False
+            if e.kind == CHECK:
+                if self.on_check is not None:
+                    self.on_progress(run, self.repeats, e.t)
+                    before = time.perf_counter()
+                    try:
+                        ok = self.on_check(e, run)
+                    except Exception:
+                        ok = False  # can't tell whether the screen is right: don't carry on blind
+                    start += time.perf_counter() - before
+                    if not ok:
+                        self.check_failed = True
+                        self._stop.set()
+                    if self._stop.is_set():
+                        # stopped at the checkpoint: resuming from here checks it again
+                        self.on_progress(run, self.repeats, e.t)
+                        return False
+                done_t = e.t
+                continue
             try:
                 self._do(e)
             except Exception:

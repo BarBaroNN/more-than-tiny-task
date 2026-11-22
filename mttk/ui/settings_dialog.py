@@ -1,16 +1,19 @@
-"""Settings dialog: window behaviour, recording, playback, centring, hotkeys."""
+"""Settings dialog: window behaviour, recording, playback, checkpoints & alerts, centring, hotkeys."""
 from __future__ import annotations
 
 import copy
+import threading
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QPushButton, QSlider, QSpinBox,
-                               QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+                               QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSlider,
+                               QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
 
 from .. import keys as K
+from .. import notify
 from ..backend import EASINGS
 from ..settings import DEFAULT_HOTKEYS, HOTKEY_LABELS, Settings
+from . import theme
 
 
 class HotkeyEdit(QLineEdit):
@@ -73,6 +76,20 @@ def _row(*widgets):
     return w
 
 
+class _Relay(QObject):
+    """Brings results of background network calls back to the GUI thread."""
+    done = Signal(str, bool, str)   # what, ok, text
+
+
+def _hint(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setObjectName("Faint")
+    lbl.setWordWrap(True)
+    lbl.setTextFormat(Qt.RichText)
+    lbl.setOpenExternalLinks(True)
+    return lbl
+
+
 def _form():
     w = QWidget()
     f = QFormLayout(w)
@@ -84,7 +101,9 @@ def _form():
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: Settings, parent=None):
+    TABS = ("general", "recording", "playback", "alerts", "centring", "hotkeys")
+
+    def __init__(self, settings: Settings, parent=None, tab: str = ""):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setMinimumWidth(700)
@@ -176,6 +195,8 @@ class SettingsDialog(QDialog):
         f.addRow(QLabel("Repeat count, delay between runs and speed are set on the main window."))
         tabs.addTab(w, "Playback")
 
+        tabs.addTab(self._alerts_tab(), "Checkpoints && alerts")
+
         # --- Mouse centring
         w, f = _form()
         self.center_target = QComboBox()
@@ -199,7 +220,7 @@ class SettingsDialog(QDialog):
         # --- Hotkeys
         w, f = _form()
         self.hotkey_edits = {}
-        for action in ("record", "play", "stop", "center"):
+        for action in ("record", "play", "stop", "center", "checkpoint"):
             edit = HotkeyEdit(self.s.hotkeys.get(action, ""))
             clear = QPushButton("Clear")
             clear.clicked.connect(lambda _=False, e=edit: e.set_value(""))
@@ -214,17 +235,187 @@ class SettingsDialog(QDialog):
             e.changed.connect(self._check_conflicts)
         note = QLabel("Click a box, then press the key or combination (e.g. Ctrl+Shift+R).\n"
                       "Hotkeys work globally, even when another window is focused.\n"
-                      "Record, play and centre keys are never recorded and don't reach other apps.\n"
+                      "Record, play, centre and checkpoint keys are never recorded and don't reach other apps.\n"
                       "The stop-playback key only does something while a macro is playing.")
         note.setObjectName("Faint")
         f.addRow("", note)
         tabs.addTab(w, "Hotkeys")
+
+        if tab in self.TABS:
+            tabs.setCurrentIndex(self.TABS.index(tab))
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setObjectName("Primary")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
+
+    # ------------------------------------------------- checkpoints & alerts
+    def _alerts_tab(self):
+        s = self.s
+        w, f = _form()
+        self._relay = _Relay(self)
+        self._relay.done.connect(self._network_done)
+
+        title = QLabel("SCREEN CHECKPOINTS")
+        title.setObjectName("CardTitle")
+        f.addRow(title)
+        self.cp_threshold = QSpinBox()
+        self.cp_threshold.setRange(10, 100)
+        self.cp_threshold.setSuffix(" %")
+        self.cp_threshold.setValue(s.checkpoint_threshold)
+        f.addRow("New checkpoints need", _row(self.cp_threshold, QLabel("of their area to look the same"), None))
+        self.cp_timeout = QDoubleSpinBox()
+        self.cp_timeout.setRange(0, 600)
+        self.cp_timeout.setDecimals(1)
+        self.cp_timeout.setSuffix(" s")
+        self.cp_timeout.setValue(s.checkpoint_timeout)
+        f.addRow("and wait up to", _row(self.cp_timeout, QLabel("for the screen to catch up"), None))
+        f.addRow("", _hint("Press the checkpoint key (F7) while recording, or when playback is stopped at the "
+                           "right spot, to save a picture of the screen at that moment. During playback the macro "
+                           "pauses there until the screen looks the same. If it doesn't, the macro stops, "
+                           "releases all keys and sends an alert. Double-click a checkpoint on the timeline to "
+                           "choose its area and change its settings."))
+
+        title = QLabel("PHONE ALERTS")
+        title.setObjectName("CardTitle")
+        f.addRow(title)
+        self.service = QComboBox()
+        for key, label in notify.SERVICES.items():
+            self.service.addItem(label, key)
+        i = self.service.findData(s.notify_service)
+        self.service.setCurrentIndex(i if i >= 0 else 0)
+        f.addRow("Send alerts with", self.service)
+
+        self.svc_stack = QStackedWidget()
+        self.svc_stack.addWidget(QWidget())  # off
+
+        # ntfy
+        page, pf = self._subform()
+        self.ntfy_server = QLineEdit(s.ntfy_server or notify.NTFY_DEFAULT_SERVER)
+        pf.addRow("Server", self.ntfy_server)
+        self.ntfy_topic = QLineEdit(s.ntfy_topic)
+        self.ntfy_topic.setPlaceholderText("e.g. mttk-3f9a1c0b7d2e")
+        gen = QPushButton("New random topic")
+        gen.clicked.connect(lambda: self.ntfy_topic.setText(notify.random_topic()))
+        pf.addRow("Topic", _row(self.ntfy_topic, gen))
+        self.ntfy_token = QLineEdit(s.ntfy_token)
+        self.ntfy_token.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.ntfy_token.setPlaceholderText("optional, for protected topics")
+        pf.addRow("Access token", self.ntfy_token)
+        pf.addRow("", _hint("Install the free <b>ntfy</b> app (Android / iPhone), tap <b>+</b> and subscribe to "
+                            "the same topic. Anyone who knows a topic name can read it, so keep it hard to guess. "
+                            f"<a href='https://ntfy.sh' style='color:{theme.ACCENT}'>ntfy.sh</a>"))
+        self.svc_stack.addWidget(page)
+
+        # telegram
+        page, pf = self._subform()
+        self.tg_token = QLineEdit(s.telegram_token)
+        self.tg_token.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.tg_token.setPlaceholderText("123456789:AA...")
+        pf.addRow("Bot token", self.tg_token)
+        self.tg_chat = QLineEdit(s.telegram_chat_id)
+        find = QPushButton("Find my chat ID")
+        find.clicked.connect(self._find_chat_id)
+        pf.addRow("Chat ID", _row(self.tg_chat, find))
+        pf.addRow("", _hint("In Telegram, message <b>@BotFather</b>, send <b>/newbot</b> and paste the token it "
+                            "gives you. Then open your new bot, send it any message and press "
+                            "<b>Find my chat ID</b>."))
+        self.svc_stack.addWidget(page)
+
+        # discord
+        page, pf = self._subform()
+        self.discord_url = QLineEdit(s.discord_webhook)
+        self.discord_url.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        self.discord_url.setPlaceholderText("https://discord.com/api/webhooks/...")
+        pf.addRow("Webhook URL", self.discord_url)
+        pf.addRow("", _hint("In Discord: <b>Server settings, Integrations, Webhooks, New webhook</b>, pick a "
+                            "channel and press <b>Copy webhook URL</b>. Turn on notifications for that channel "
+                            "in the phone app."))
+        self.svc_stack.addWidget(page)
+        f.addRow("", self.svc_stack)
+        self.service.currentIndexChanged.connect(self._service_changed)
+
+        self.attach = QCheckBox("Attach a screenshot of the screen when it went wrong")
+        self.attach.setChecked(s.notify_attach_screenshot)
+        f.addRow("Alert", self.attach)
+        self.on_finish = QCheckBox("Also send a message when a macro finishes normally")
+        self.on_finish.setChecked(s.notify_on_finish)
+        f.addRow("", self.on_finish)
+        self.test_btn = QPushButton("Send a test alert")
+        self.test_btn.clicked.connect(self._send_test)
+        self.net_status = QLabel("")
+        self.net_status.setWordWrap(True)
+        f.addRow("", _row(self.test_btn, self.net_status, None))
+        self._service_changed()
+        return w
+
+    @staticmethod
+    def _subform():
+        page = QWidget()
+        pf = QFormLayout(page)
+        pf.setContentsMargins(0, 0, 0, 0)
+        pf.setHorizontalSpacing(12)
+        pf.setVerticalSpacing(8)
+        return page, pf
+
+    def _service_changed(self, *_):
+        idx = self.service.currentIndex()
+        self.svc_stack.setCurrentIndex(idx)
+        for i in range(self.svc_stack.count()):  # size the stack to the shown page only
+            self.svc_stack.widget(i).setSizePolicy(
+                QSizePolicy.Preferred, QSizePolicy.Preferred if i == idx else QSizePolicy.Ignored)
+        self.svc_stack.adjustSize()
+        on = self.service.currentData() != "none"
+        for wdg in (self.attach, self.on_finish, self.test_btn):
+            wdg.setEnabled(on)
+        self.net_status.setText("")
+
+    def _notify_config(self) -> dict:
+        return {
+            "service": self.service.currentData(),
+            "ntfy_server": self.ntfy_server.text().strip() or notify.NTFY_DEFAULT_SERVER,
+            "ntfy_topic": self.ntfy_topic.text().strip(),
+            "ntfy_token": self.ntfy_token.text().strip(),
+            "telegram_token": self.tg_token.text().strip(),
+            "telegram_chat_id": self.tg_chat.text().strip(),
+            "discord_webhook": self.discord_url.text().strip(),
+        }
+
+    def _send_test(self):
+        cfg = self._notify_config()
+        err = notify.problem(cfg)
+        if err:
+            self.net_status.setText("\u26a0 " + err)
+            return
+        self.net_status.setText("Sending...")
+        self.test_btn.setEnabled(False)
+        notify.send_async(cfg, "More Than Tiny Task", "Test alert: phone alerts work.", priority="default",
+                          tags="white_check_mark",
+                          on_done=lambda ok, text: self._relay.done.emit("test", ok, text))
+
+    def _find_chat_id(self):
+        token = self.tg_token.text().strip()
+        self.net_status.setText("Asking Telegram...")
+
+        def run():
+            try:
+                chat, name = notify.telegram_chat_id(token)
+                self._relay.done.emit("chat", True, chat + "|" + name)
+            except Exception as exc:
+                self._relay.done.emit("chat", False, str(exc))
+        threading.Thread(target=run, name="mttk-telegram", daemon=True).start()
+
+    def _network_done(self, what: str, ok: bool, text: str):
+        self.test_btn.setEnabled(self.service.currentData() != "none")
+        if what == "chat" and ok:
+            chat, _, name = text.partition("|")
+            self.tg_chat.setText(chat)
+            self.net_status.setText("\u2713 Found the chat with " + (name or "you"))
+        elif ok:
+            self.net_status.setText("\u2713 Sent. Check your phone.")
+        else:
+            self.net_status.setText("\u26a0 " + text)
 
     def _check_conflicts(self, *_):
         seen, dup = {}, []
@@ -258,4 +449,16 @@ class SettingsDialog(QDialog):
         s.center_duration_ms = self.center_ms.value()
         s.center_easing = self.easing.currentText()
         s.hotkeys = {a: e.value for a, e in self.hotkey_edits.items()}
+        s.checkpoint_threshold = self.cp_threshold.value()
+        s.checkpoint_timeout = self.cp_timeout.value()
+        cfg = self._notify_config()
+        s.notify_service = cfg["service"]
+        s.ntfy_server = cfg["ntfy_server"]
+        s.ntfy_topic = cfg["ntfy_topic"]
+        s.ntfy_token = cfg["ntfy_token"]
+        s.telegram_token = cfg["telegram_token"]
+        s.telegram_chat_id = cfg["telegram_chat_id"]
+        s.discord_webhook = cfg["discord_webhook"]
+        s.notify_attach_screenshot = self.attach.isChecked()
+        s.notify_on_finish = self.on_finish.isChecked()
         return s
