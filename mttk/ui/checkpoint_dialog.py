@@ -239,7 +239,8 @@ class CheckpointDialog(QDialog):
         self.test_result.setText("")
 
     def _retake(self):
-        img = self._grab_screen(self.picker.image_rect)
+        # the picture's area is in the macro's coordinates: take it where it is on screen now
+        img = self._grab_screen(self.to_screen(self.picker.image_rect, self.spec.get("screen")))
         if img is None or img.isNull():
             self.test_result.setText("Couldn't take a screenshot.")
             return

@@ -7,9 +7,9 @@ import time
 from typing import List, Optional
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence, QUndoCommand, QUndoStack
+from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QUndoCommand, QUndoStack
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
-                               QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView,
+                               QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
                                QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox,
                                QProgressBar, QSpinBox, QSplitter, QSystemTrayIcon, QTableView,
                                QToolButton, QVBoxLayout, QWidget)
@@ -114,6 +114,7 @@ class MainWindow(QMainWindow):
         self._play_duration = 0.0
         self._play_runs = 1
         self._play_shift = (0, 0)
+        self._play_map = None        # screens.ScreenMap the current playback uses
         self._was_visible = True
         self._rec_checkpoints = {}   # checkpoints taken during the current recording
         self._runner = None          # vision.CheckpointRunner while a macro with checkpoints plays
@@ -288,6 +289,26 @@ class MainWindow(QMainWindow):
         mv.addWidget(self.chk_adapt)
         prow.addWidget(mouse_opts)
 
+        screen_opts = QWidget()
+        sg = QGridLayout(screen_opts)
+        sg.setContentsMargins(0, 0, 0, 0)
+        sg.setHorizontalSpacing(6)
+        sg.setVerticalSpacing(4)
+        lbl = QLabel("SCREEN")
+        lbl.setObjectName("CardTitle")
+        sg.addWidget(lbl, 0, 0, 1, 2)
+        self.cmb_record_on = QComboBox()
+        self.cmb_record_on.setToolTip("Which screen new recordings belong to. Positions are stored relative to it,\n"
+                                      "so the macro can be played on any screen, whatever is connected.")
+        self.cmb_play_on = QComboBox()
+        self.cmb_play_on.setToolTip("Which screen to play on. Mouse positions are moved (and rescaled) from the\n"
+                                    "screen they were recorded on, and never end up off-screen.")
+        sg.addWidget(QLabel("Record on"), 1, 0)
+        sg.addWidget(self.cmb_record_on, 1, 1)
+        sg.addWidget(QLabel("Play on"), 2, 0)
+        sg.addWidget(self.cmb_play_on, 2, 1)
+        prow.addWidget(screen_opts)
+
         safety = QWidget()
         sv = QVBoxLayout(safety)
         sv.setContentsMargins(0, 0, 0, 0)
@@ -336,6 +357,17 @@ class MainWindow(QMainWindow):
         self.chk_adapt.toggled.connect(self._save_playback_options)
         self.chk_checks.toggled.connect(self._save_playback_options)
         self.chk_adapt.toggled.connect(lambda _on: self._update_screen_label())
+        self.cmb_record_on.activated.connect(self._screen_choice_changed)
+        self.cmb_play_on.activated.connect(self._screen_choice_changed)
+        self._remember_layout()
+        self._refresh_screen_choices()
+        app = QGuiApplication.instance()
+        for sig in (app.screenAdded, app.screenRemoved, app.primaryScreenChanged):
+            sig.connect(lambda *_: QTimer.singleShot(400, self._on_screens_changed))
+        for scr in app.screens():
+            scr.geometryChanged.connect(lambda *_: QTimer.singleShot(400, self._on_screens_changed))
+        app.screenAdded.connect(lambda scr: scr.geometryChanged.connect(
+            lambda *_: QTimer.singleShot(400, self._on_screens_changed)))
         self.cmb_unit.currentTextChanged.connect(self._save_playback_options)
         root.addWidget(pb)
 
@@ -667,35 +699,85 @@ class MainWindow(QMainWindow):
             return
         self.undo.push(SetEventsCommand(self, self.events, new_events, text, self.meta, meta))
 
-    # ------------------------------------------------- screen / resolution
-    def _macro_screen(self):
-        scr = self.meta.get("screen")
-        return list(scr) if scr and len(scr) == 4 else None
+    # ------------------------------------------------- screens / resolution
+    def _refresh_screen_choices(self):
+        """Fill the Record on / Play on lists with the screens connected now."""
+        from ..screens import describe
+        mons = winutil.monitors()
+        screens = [(describe(mons, i), i) for i in range(len(mons))]
+        lists = ((self.cmb_record_on, [("Screen under the mouse", "auto")] + screens + [("All screens", "all")],
+                  self.settings.record_on),
+                 (self.cmb_play_on, [("Same screen(s) as recorded", "recorded")] + screens,
+                  self.settings.play_on))
+        for combo, items, current in lists:
+            combo.blockSignals(True)
+            combo.clear()
+            for text, data in items:
+                combo.addItem(text, data)
+            i = next((n for n, (_t, d) in enumerate(items) if d == current and type(d) is type(current)), 0)
+            combo.setCurrentIndex(i)
+            combo.blockSignals(False)
+
+    def _screen_choice_changed(self, *_):
+        self.settings.record_on = self.cmb_record_on.currentData()
+        self.settings.play_on = self.cmb_play_on.currentData()
+        self.settings.save()
+        self._update_screen_label()
+
+    def _on_screens_changed(self):
+        self._remember_layout()
+        self._refresh_screen_choices()
+        self._update_screen_label()
+
+    def _remember_layout(self):
+        """Keep the monitor layouts this PC has had, so old macros recorded on a
+        screen that is unplugged now can still be placed exactly."""
+        from ..screens import remember_layout, same_layout
+        mons = winutil.monitors()
+        known = self.settings.known_layouts or []
+        if not known or not same_layout(known[0], mons):
+            self.settings.known_layouts = remember_layout(known, mons)
+            self.settings.save()
+
+    def _upgrade_legacy_meta(self) -> bool:
+        """Macros saved before 0.0.4 only stored the main screen. Work out the
+        layout they were recorded on (connected now or seen before) and keep it
+        in the macro, so it's written to the file on the next save."""
+        from ..screens import find_legacy_layout
+        if self.meta.get("monitors") or not self.events:
+            return False
+        found = find_legacy_layout(self.meta, self.events,
+                                   [winutil.monitors()] + list(self.settings.known_layouts or []))
+        if found:
+            self.meta.update(found)
+        return bool(found)
+
+    def _screen_map(self):
+        """Maps this macro's positions onto the screens connected right now."""
+        from ..screens import ScreenMap
+        return ScreenMap(self.meta, winutil.monitors(), self.settings.play_on,
+                         scale=self.chk_adapt.isChecked(), events=self.events,
+                         known_layouts=self.settings.known_layouts)
 
     def _update_screen_label(self):
-        scr = self._macro_screen()
-        if not self.events or not scr:
+        if not self.events:
             self.sb_screen.setText("")
             return
-        cur = winutil.primary_screen_rect()
-        txt = f"Recorded at {scr[2]}×{scr[3]}"
-        if cur and list(cur) != scr:
-            txt += f"  →  this screen {cur[2]}×{cur[3]}" + ("" if self.chk_adapt.isChecked() else " (not adapting)")
+        m = self._screen_map()
+        txt = m.summary()
+        if not self.chk_adapt.isChecked() and not m.is_identity():
+            txt += "  (not rescaling)"
         self.sb_screen.setText(txt)
-
-    def _to_current_screen(self, events):
-        """Macro coordinates → coordinates for the screen we're playing on."""
-        if not self.chk_adapt.isChecked():
-            return list(events)
-        return M.scale_events(events, self._macro_screen(), winutil.primary_screen_rect())
 
     def _prepare_for_playback(self, events, first_run=None):
         """Map to this screen and, for "start from current cursor", shift so the
         clip starts at the pointer. ``first_run`` (resuming mid-macro) gets the
         same shift as ``events`` so later full runs line up with it."""
-        events = self._to_current_screen(events)
+        screen_map = self._screen_map()
+        events = screen_map.map_events(events)
         if first_run is not None:
-            first_run = self._to_current_screen(first_run)
+            first_run = screen_map.map_events(first_run)
+        self._play_map = screen_map  # checkpoint areas are mapped like the positions
         self._play_shift = (0, 0)
         if self.chk_relative.isChecked():
             start = M.first_position(first_run if first_run is not None else events)
@@ -728,7 +810,7 @@ class MainWindow(QMainWindow):
         self.btn_play.setEnabled((idle and has) or self.state == PLAYING)
         self.btn_stop.setEnabled(not idle)
         for w in (self.spin_repeat, self.chk_infinite, self.spin_delay, self.cmb_unit, self.spin_speed,
-                  self.chk_relative, self.chk_adapt, self.chk_checks):
+                  self.chk_relative, self.chk_adapt, self.cmb_record_on, self.cmb_play_on, self.chk_checks):
             w.setEnabled(idle)
         if idle:
             self.spin_repeat.setEnabled(not self.chk_infinite.isChecked())
@@ -1033,10 +1115,8 @@ class MainWindow(QMainWindow):
         mode = self._rec_ctx["mode"]
         if mode in ("replace", "insert") and self.settings.move_cursor_before_rerecord:
             pos = M.cursor_position_at(self.events, self._rec_ctx["start"])
-            if pos and self._macro_screen():
-                mapped = M.scale_events([Event(0.0, MOVE, x=pos[0], y=pos[1])], self._macro_screen(),
-                                        winutil.primary_screen_rect())
-                pos = (mapped[0].x, mapped[0].y)
+            if pos:
+                pos = self._screen_map().point(*pos)
             if pos:
                 try:
                     from ..backend import set_mouse_position
@@ -1085,6 +1165,10 @@ class MainWindow(QMainWindow):
                                  ignore_key=self._recording_ignored_keys())
         self._rec_checkpoints = {}
         self._osd_note = ("", 0.0)
+        from ..screens import resolve_record_on
+        mons = winutil.monitors()
+        self._rec_ctx["monitors"] = mons
+        self._rec_ctx["record_on"] = resolve_record_on(s.record_on, mons, winutil.cursor_pos())
         self.recorder.start()
         self.state = RECORDING
         ctx = self._rec_ctx
@@ -1137,17 +1221,27 @@ class MainWindow(QMainWindow):
         self.timeline.set_overlay("")
         self._restore_after_task()
         ctx = self._rec_ctx
-        current = winutil.primary_screen_rect()
         meta = dict(self.meta)
-        if ctx["mode"] == "new" or not self.events or not self._macro_screen():
-            if clip and current:
-                meta["screen"] = list(current)
-        elif current and self._macro_screen() != list(current):
-            # a take recorded on another resolution: store it in the macro's coordinates
-            clip = M.scale_events(clip, current, self._macro_screen())
-        if self._rec_checkpoints:
-            meta = M.with_checkpoints(meta, self._rec_checkpoints)
-            self._rec_checkpoints = {}
+        rec_checkpoints, self._rec_checkpoints = self._rec_checkpoints, {}
+        if ctx["mode"] == "new" or not self.events:
+            if clip:
+                from ..screens import layout_meta
+                meta.update(layout_meta(ctx["monitors"], ctx["record_on"]))
+        else:
+            # a take recorded now (maybe on other screens): store it in the
+            # macro's own coordinates so it lines up with the rest
+            from ..screens import ALL
+            screen_map = self._screen_map()
+            clip = screen_map.inverse_events(clip)
+            # checkpoints taken during the take: their areas too
+            rec_checkpoints = {ref: self._spec_to_macro(spec, screen_map)
+                               for ref, spec in rec_checkpoints.items()}
+            meta["monitors"] = [list(r) for r in screen_map.recorded]
+            meta["record_on"] = screen_map.record_on
+            ref = screen_map.record_on if screen_map.record_on != ALL else 0
+            meta["screen"] = list(screen_map.recorded[ref])
+        if rec_checkpoints:
+            meta = M.with_checkpoints(meta, rec_checkpoints)
         if ctx["mode"] == "new":
             if clip:
                 self.apply_edit(clip, "Record", meta)
@@ -1381,16 +1475,30 @@ class MainWindow(QMainWindow):
         return V.new_checkpoint(img, mon, winutil.primary_screen_rect(), self._next_checkpoint_name(),
                                 s.checkpoint_threshold, s.checkpoint_timeout)
 
-    def _checkpoint_to_screen(self, rect, screen):
-        """A checkpoint area on this screen, rescaled like mouse positions."""
-        if self.chk_adapt.isChecked():
-            return V.scale_rect(rect, screen, winutil.primary_screen_rect())
-        return list(rect)
+    # Checkpoint areas are stored in the macro's coordinates, like its mouse
+    # positions, and go through the same Record on / Play on screen mapping.
+    def _checkpoint_to_screen(self, rect, screen=None):
+        """A checkpoint area -> where it is on the screens now (Play on, rescaling)."""
+        return list(self._screen_map().rect(rect))
 
-    def _playback_to_screen(self, rect, screen):
-        r = self._checkpoint_to_screen(rect, screen)
+    def _playback_to_screen(self, rect, screen=None):
+        """The same during playback: the mapping it started with, plus "start from current cursor"."""
+        x, y, w, h = (self._play_map or self._screen_map()).rect(rect)
         dx, dy = self._play_shift
-        return [r[0] + dx, r[1] + dy, r[2], r[3]]
+        return [x + dx, y + dy, w, h]
+
+    def _spec_to_macro(self, spec: dict, screen_map=None, shift=(0, 0)) -> dict:
+        """A checkpoint just taken (areas on the screens now) -> the macro's
+        coordinates. ``shift`` is undone first ("start from current cursor")."""
+        if screen_map is None:
+            if not self.events and not self.meta.get("monitors"):
+                return spec  # nothing recorded yet: the recording will use the screens now
+            screen_map = self._screen_map()
+        out = dict(spec)
+        for key in ("image_rect", "region"):
+            x, y, w, h = spec[key]
+            out[key] = list(screen_map.inverse_rect([x - shift[0], y - shift[1], w, h]))
+        return out
 
     def _note(self, text: str, color: str = theme.GREEN, ms: int = 3000):
         """A short message in the status line and the on-screen indicator. While
@@ -1433,14 +1541,10 @@ class MainWindow(QMainWindow):
         if img is None or img.isNull() or t is None:
             self._note("Couldn't take a screenshot for the checkpoint", theme.RED)
             return
-        spec = self._new_checkpoint_spec(img, mon)
-        dx, dy = self._play_shift
-        if dx or dy:
-            # "start from current cursor" moved the macro: store the picture where it
-            # would be unshifted, so next time it moves with the mouse positions again
-            for key in ("image_rect", "region"):
-                x, y, w, h = spec[key]
-                spec[key] = [x - dx, y - dy, w, h]
+        # undo what this playback did to the positions (Play on screen, "start from
+        # current cursor"), so next time the picture moves with them again
+        spec = self._spec_to_macro(self._new_checkpoint_spec(img, mon), self._play_map or self._screen_map(),
+                                   self._play_shift)
         ref = V.new_id()
         # apply_edit refuses edits while playing; this one doesn't touch the events being played
         self.undo.push(SetEventsCommand(self, self.events, M.add_event(self.events, Event(t, CHECK, ref=ref)),
@@ -1463,11 +1567,12 @@ class MainWindow(QMainWindow):
         ref = V.new_id()
         spec = self._new_checkpoint_spec(img, mon)
         if self.state == RECORDING and self.recorder:
-            self._rec_checkpoints[ref] = spec
+            self._rec_checkpoints[ref] = spec  # converted with the take when recording stops
             t = self.recorder.add_checkpoint(ref)
             self._note(f"\u25c6 {spec['name']} saved at {fmt_time(t, 1)}")
         elif self.state == IDLE:
             t = self.timeline.playhead
+            spec = self._spec_to_macro(spec)
             self.apply_edit(M.add_event(self.events, Event(t, CHECK, ref=ref)), "Add checkpoint",
                             M.with_checkpoints(self.meta, {ref: spec}))
             self._note(f"\u25c6 {spec['name']} added at {fmt_time(t, 2)}  \u00b7  double-click it on the "
@@ -1481,15 +1586,14 @@ class MainWindow(QMainWindow):
         near = None
         pos = M.cursor_position_at(self.events, t)
         if pos:  # the monitor the macro is working on at that moment
-            p = self._to_current_screen([Event(0.0, MOVE, x=pos[0], y=pos[1])])[0]
-            near = (p.x, p.y)
+            near = self._screen_map().point(*pos)
         img, mon = self._take_checkpoint_picture(near)
         if img is None:
             QMessageBox.warning(self, APP_NAME, "Couldn't take a screenshot.")
             return
         with self._hotkeys_paused():
-            dlg = CheckpointDialog(self._new_checkpoint_spec(img, mon), t, self._grab_without_us,
-                                   self._checkpoint_to_screen, self, is_new=True)
+            dlg = CheckpointDialog(self._spec_to_macro(self._new_checkpoint_spec(img, mon)), t,
+                                   self._grab_without_us, self._checkpoint_to_screen, self, is_new=True)
             if dlg.exec() != QDialog.Accepted:
                 return
         ref = V.new_id()
@@ -1686,15 +1790,19 @@ class MainWindow(QMainWindow):
         self.settings.save()
         self.undo.clear()
         self.meta = dict(macro.meta or {})
+        self.events = list(macro.events)
+        upgraded = self._upgrade_legacy_meta()
         self._set_events(macro.events)
         self.timeline.set_selection(None)
         self.timeline.set_playhead(0.0, emit=True)
         self.timeline.zoom_fit()
-        self.lbl_status.setText(f"Opened {os.path.basename(path)}")
+        self.lbl_status.setText(f"Opened {os.path.basename(path)}"
+                                + ("  ·  screen layout found, saved with the macro on the next save" if upgraded else ""))
 
     def save(self) -> bool:
         if not self.file_path:
             return self.save_as()
+        self._upgrade_legacy_meta()
         try:
             Macro(self.events, meta={**self.meta, "app_version": __version__}).save(self.file_path)
         except Exception as exc:

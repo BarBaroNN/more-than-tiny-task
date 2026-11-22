@@ -117,17 +117,6 @@ def work_size(w: int, h: int, limit: int = WORK_SIZE) -> Tuple[int, int]:
 
 # --------------------------------------------------------------- geometry
 
-def scale_rect(rect: Sequence[int], src: Optional[Sequence[int]], dst: Optional[Sequence[int]]) -> List[int]:
-    """Map ``(x, y, w, h)`` from screen rect ``src`` to ``dst`` (like ``model.scale_events``)."""
-    x, y, w, h = (int(v) for v in rect)
-    if not src or not dst or tuple(src) == tuple(dst) or src[2] <= 0 or src[3] <= 0:
-        return [x, y, w, h]
-    sl, st, sw, sh = src
-    dl, dt, dw, dh = dst
-    fx, fy = dw / sw, dh / sh
-    return [round(dl + (x - sl) * fx), round(dt + (y - st) * fy), max(1, round(w * fx)), max(1, round(h * fy))]
-
-
 def clamp_region(region: Sequence[int], bounds: Sequence[int]) -> List[int]:
     """Keep ``region`` inside ``bounds`` (both ``x, y, w, h``), at least 4x4."""
     bx, by, bw, bh = bounds
@@ -196,8 +185,9 @@ def decode_image(text: str):
 # Stored in macro meta["checkpoints"][id] (see model.py):
 #   name         label shown on the timeline and in alerts
 #   image        base64 JPEG of the whole monitor at the moment it was taken
-#   image_rect   [x, y, w, h] of the desktop that picture shows (physical px)
-#   screen       primary screen rect when it was taken (for other resolutions)
+#   image_rect   [x, y, w, h] that picture shows, in the macro's coordinates (like its
+#                mouse positions: mapped to the screens now with screens.ScreenMap.rect)
+#   screen       primary screen rect when it was taken (for information only)
 #   region       [x, y, w, h] of the area to compare, same coordinates as image_rect
 #   threshold    % of the area that must look the same
 #   timeout      seconds to keep retrying before it counts as failed

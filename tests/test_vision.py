@@ -58,7 +58,6 @@ def test_find_shift_reports_drift():
 def test_work_size_and_rects():
     assert V.work_size(1920, 1080) == (128, 72)
     assert V.work_size(50, 20) == (50, 20)
-    assert V.scale_rect([1280, 720, 640, 360], (0, 0, 2560, 1440), (0, 0, 1920, 1080)) == [960, 540, 480, 270]
     assert V.clamp_region([-10, 5, 5000, 50], [0, 0, 1920, 1080]) == [0, 5, 1920, 50]
 
 
@@ -148,7 +147,7 @@ def test_runner_maps_area_to_this_screen():
     big = screen_image(1600, 1200, box=QRect(600, 400, 320, 180))     # same picture, twice the resolution
     spec = spec_for(ref, [280, 180, 200, 130])
     r, results, _ = make_runner(lambda: big, spec,
-                                to_screen=lambda rect, scr: V.scale_rect(rect, scr, [0, 0, 1600, 1200]))
+                                to_screen=lambda rect, scr: [v * 2 for v in rect])
     assert r.check("a") is True and results[-1].score > 0.9
 
 
