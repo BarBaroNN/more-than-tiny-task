@@ -105,6 +105,53 @@ def test_old_macro_on_the_main_screen_keeps_old_behaviour(tmp_path):
     assert moves(sm.map_events(events)) == [(960, 540)]
 
 
+def with_checkpoint(m, image_rect):
+    """The macro with a checkpoint as the build without layouts saved it: a
+    picture of the whole monitor, ``image_rect`` being that monitor."""
+    meta = dict(m.meta)
+    meta["checkpoints"] = {"c1": {"name": "Checkpoint 1", "image": "", "image_rect": list(image_rect),
+                                  "screen": MAIN, "region": list(image_rect)}}
+    return meta
+
+
+def test_checkpoint_picture_tells_the_unplugged_screen_exactly(tmp_path):
+    # the reported bug: recorded on the 2K second screen, played with only the
+    # 1080p one and no remembered layout. The guess from the mouse's extent
+    # (about 2059x1155) under-scaled everything and the checkpoint grabbed
+    # 2387x1346, a fifth of it off-screen.
+    m = old_file(tmp_path)
+    meta = with_checkpoint(m, SECOND)
+    found = find_legacy_layout(meta, m.events, [ONLY_MAIN])
+    assert found["monitors"] == TWO and found["record_on"] == 1
+    sm = ScreenMap(meta, ONLY_MAIN, events=m.events)
+    assert moves(sm.map_events(m.events)) == [(960, 226), (1252, 540), (1544, 866)]
+    assert sm.rect(SECOND) == (0, 0, 1920, 1080)
+    assert not sm.note
+
+
+def test_checkpoint_layout_wins_over_another_screen_connected_now(tmp_path):
+    # a 4K screen sits where the 2K one was: the points fit on it, but the
+    # checkpoint shows they were recorded on a 2560x1440 screen
+    m = old_file(tmp_path)
+    four_k = [MAIN, [1920, 0, 3840, 2160]]
+    sm = ScreenMap(with_checkpoint(m, SECOND), four_k, events=m.events)
+    assert moves(sm.map_events(m.events))[1] == (1920 + 2504, 1080)
+
+
+def test_checkpoint_on_the_main_screen_says_nothing_new(tmp_path):
+    m = old_file(tmp_path)
+    assert find_legacy_layout(with_checkpoint(m, MAIN), m.events, [ONLY_MAIN]) is None
+
+
+def test_unknown_screen_takes_the_size_of_a_screen_seen_before(tmp_path):
+    # no checkpoint and the two-screen layout was never seen, but this PC has
+    # had a 2560x1440 screen: that fits the recording, 1920x1080 doesn't
+    m = old_file(tmp_path)
+    sm = ScreenMap(m.meta, ONLY_MAIN, events=m.events, known_layouts=[ONLY_MAIN, ONLY_BIG])
+    assert moves(sm.map_events(m.events)) == [(960, 226), (1252, 540), (1544, 866)]
+    assert sm.note  # still a guess
+
+
 def test_remember_layout_keeps_newest_first_without_duplicates():
     known = remember_layout([], TWO)
     known = remember_layout(known, ONLY_BIG)

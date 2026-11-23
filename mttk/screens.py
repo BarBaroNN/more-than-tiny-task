@@ -92,27 +92,65 @@ def remember_layout(known: list, layout: Sequence[Rect], limit: int = 12) -> lis
     return [layout] + rest[:limit - 1]
 
 
+def _legacy_main(meta: dict) -> Optional[Rect]:
+    s = meta.get("screen")
+    return _rect(s) if s and len(s) == 4 else None
+
+
+def _overlaps(a: Rect, b: Rect) -> bool:
+    return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+
+
+def checkpoint_layout(meta: dict) -> Optional[List[Rect]]:
+    """The screens an old macro's checkpoints were taken on, main screen
+    first, or None if they show no screen besides the main one.
+
+    Before layouts were stored, a checkpoint's picture was the whole monitor
+    under the mouse and its ``image_rect`` was that monitor's rect in desktop
+    pixels, so it tells the size and place of a screen that may be unplugged
+    now. Rects that overlap the main screen or each other can't all be
+    screens of one layout; the first one wins.
+    """
+    main = _legacy_main(meta)
+    if main is None:
+        return None
+    found: List[Rect] = []
+    for spec in (meta.get("checkpoints") or {}).values():
+        r = spec.get("image_rect") if isinstance(spec, dict) else None
+        if not r or len(r) != 4 or r[2] <= 0 or r[3] <= 0:
+            continue
+        r = _rect(r)
+        if not _overlaps(r, main) and not any(_overlaps(r, f) for f in found):
+            found.append(r)
+    return [main] + sorted(found, key=lambda r: (r[0], r[1])) if found else None
+
+
 def find_legacy_layout(meta: dict, events: Sequence[Event], layouts: Sequence[Sequence[Rect]]) -> Optional[dict]:
     """Layout metadata for a macro saved without it (before 0.0.4: only the
     main screen's rect), or None if it can't be told.
 
     Positions on the stored main screen keep meaning "the main screen". If
-    they lie elsewhere, the layout they were recorded on is looked up in
-    ``layouts``: the first one is the layout connected now (any of its screens
-    may hold them), the others are layouts seen before (their main screen must
-    match the stored one).
+    they lie elsewhere, the layout they were recorded on is, in this order:
+    the one its checkpoint pictures were taken on (see ``checkpoint_layout``),
+    or one in ``layouts``: the first is the layout connected now (any of its
+    screens may hold them), the others are layouts seen before (their main
+    screen must match the stored one).
     """
     if meta.get("monitors"):
         return None
     pts = [(e.x, e.y) for e in events if e.kind in POSITIONAL]
-    main = _rect(meta["screen"]) if meta.get("screen") and len(meta["screen"]) == 4 else None
+    main = _legacy_main(meta)
     if not pts:
         return None
     if main and sum(contains(main, *p) for p in pts) * 2 > len(pts):
         return layout_meta([main], 0)
-    for n, layout in enumerate(layouts):
+    candidates = [(layout, n > 0) for n, layout in enumerate(layouts)]
+    from_checkpoints = checkpoint_layout(meta)
+    if from_checkpoints:
+        candidates.insert(0, (from_checkpoints, False))
+    for layout, needs_same_main in candidates:
         mons = [_rect(r) for r in layout or []]
-        if not mons or (n > 0 and main and mons[0] != main):
+        if not mons or (needs_same_main and main and mons[0] != main):
             continue
         inside = [p for p in pts if any(contains(r, *p) for r in mons)]
         if len(inside) < 0.98 * len(pts):
@@ -139,6 +177,7 @@ class ScreenMap:
         self.play_on = play_on if isinstance(play_on, int) and 0 <= play_on < len(self.current) else PLAY_RECORDED
         self.scale = scale
         self.note = ""
+        self.known_layouts = [[_rect(r) for r in layout if len(r) == 4] for layout in (known_layouts or []) if layout]
         if not meta.get("monitors"):
             # old macro: work out the layout it was recorded on, if we can
             found = find_legacy_layout(meta, events, [self.current] + list(known_layouts or []))
@@ -154,7 +193,7 @@ class ScreenMap:
 
     # -- macros saved before layouts were stored: only the main screen's rect
     def _init_legacy(self, meta: dict, events: Sequence[Event]) -> None:
-        main = _rect(meta["screen"]) if meta.get("screen") and len(meta["screen"]) == 4 else self.current[0]
+        main = _legacy_main(meta) or self.current[0]
         self.recorded, self.record_on = [main], 0
         pts = [(e.x, e.y) for e in events if e.kind in POSITIONAL]
         outside = [p for p in pts if not contains(main, *p)]
@@ -174,28 +213,27 @@ class ScreenMap:
         self.record_on = ALL
 
     def _guess_neighbour(self, main: Rect, box: Rect) -> Rect:
-        """The unknown screen a legacy macro was recorded on: Windows puts extra
-        screens next to the main one, edges aligned, so assume that, with the
-        size of the screen it will be played on (grown to fit the recording)."""
+        """The unknown screen a legacy macro was recorded on. Windows puts extra
+        screens next to the main one, edges aligned, so assume that. Its size:
+        the screen it will be played on if the recording fits on it, else the
+        smallest screen this PC has had that fits it (the mouse rarely reaches
+        a screen's far corners, so the recording's own extent is too small),
+        else the screen it plays on grown to fit."""
         target = (self.current[self.play_on] if isinstance(self.play_on, int)
                   else self.current[1] if len(self.current) > 1 else self.current[0])
-        w, h = target[2], target[3]
         ml, mt, mr, mb = main[0], main[1], main[0] + main[2], main[1] + main[3]
         bl, bt, br, bb = box[0], box[1], box[0] + box[2], box[1] + box[3]
-        if bl >= mr:
-            left = mr
-        elif br <= ml:
-            left = ml - max(w, ml - bl)
-        else:
-            left = ml
-        if bt >= mb:
-            top = mb
-        elif bb <= mt:
-            top = mt - max(h, mt - bt)
-        else:
-            top = mt
-        w = max(w, br - left)
-        h = max(h, bb - top)
+        right, below = bl >= mr, bt >= mb
+        left_of, above = not right and br <= ml, not below and bb <= mt
+        # room the recording needs on that screen, measured from its near edge
+        need_w = br - mr if right else ml - bl if left_of else br - ml
+        need_h = bb - mb if below else mt - bt if above else bb - mt
+        known = {(r[2], r[3]) for layout in [self.current] + self.known_layouts for r in layout}
+        sizes = [(target[2], target[3])] + sorted(known, key=lambda s: (s[0] * s[1], s))
+        w, h = next(((w, h) for w, h in sizes if w >= need_w and h >= need_h),
+                    (max(target[2], need_w), max(target[3], need_h)))
+        left = mr if right else ml - w if left_of else ml
+        top = mb if below else mt - h if above else mt
         return left, top, w, h
 
     # -- mapping
