@@ -31,6 +31,12 @@ from .timeline import Timeline, fmt_time
 
 IDLE, COUNTDOWN, RECORDING, PLAYING = "idle", "countdown", "recording", "playing"
 ARMED = "armed"  # re-record / insert chosen, waiting for the record hotkey to start
+PHOTO_MAX_SIDE = 1920  # screenshots sent by screenshot points are shrunk to at most this size
+
+
+def fmt_duration(t: float) -> str:
+    """A length of time for phone messages: 0.7s, 12s, 1:52, 1:02:03."""
+    return f"{t:.1f}s" if t < 9.95 else fmt_time(t, 0)
 
 
 class Bridge(QObject):
@@ -42,6 +48,7 @@ class Bridge(QObject):
     check_status = Signal(str, float, float, float)   # name, score, needed, seconds left
     check_result = Signal(object)                     # vision.CheckResult
     notified = Signal(bool, str)                      # phone alert sent?, error text
+    log_sent = Signal(bool, str)                      # other phone message (log, picture) sent?, error
 
 
 class SetEventsCommand(QUndoCommand):
@@ -121,6 +128,12 @@ class MainWindow(QMainWindow):
         self._check_failure = None
         self._fail_dialog = None
         self._alert_text = ""
+        self.outbox = notify.Outbox()   # phone messages, sent in order (progress log, pictures, alerts)
+        self._play_preview = False
+        self._closing = False
+        self._play_t0 = 0.0             # time.time() when playback started / the current run started
+        self._run_t0 = 0.0
+        self._run_end = None            # time.time() the last run ended (waiting for the next one)
         self._osd_note = ("", 0.0)   # short message shown instead of the REC / PLAY status
         self._capture_excluded = False  # this window and the indicator kept out of screenshots
 
@@ -134,6 +147,7 @@ class MainWindow(QMainWindow):
         self.bridge.check_status.connect(self._on_check_status)
         self.bridge.check_result.connect(self._on_check_result)
         self.bridge.notified.connect(self._on_notified)
+        self.bridge.log_sent.connect(self._on_log_sent)
         self.osd = OSD()
 
         self.setWindowIcon(icons.app_icon())
@@ -320,7 +334,8 @@ class MainWindow(QMainWindow):
         self.chk_checks.setChecked(s.checkpoints_enabled)
         self.chk_checks.setToolTip("At each checkpoint (\u25c6 on the timeline) the macro pauses until the screen "
                                    "looks like its picture.\nIf it doesn't within the wait time, the macro stops, "
-                                   "releases all keys and sends an alert.")
+                                   "releases all keys and sends an alert.\nScreenshot points (\U0001f4f7) send a "
+                                   "picture to your phone. Off: checkpoints and screenshot points are skipped.")
         self.lbl_alerts = QLabel("")
         self.lbl_alerts.setTextFormat(Qt.RichText)
         self.lbl_alerts.setToolTip("Where alerts go when a checkpoint fails (Settings \u2192 Checkpoints & alerts)")
@@ -408,7 +423,11 @@ class MainWindow(QMainWindow):
         b.setStyleSheet(f"QToolButton {{ color: {theme.RED}; }}")
         ebtn("insertrec", "● Insert recording", "Get ready to record a new take inserted at the playhead; recording starts when you press the record key (Ctrl+I)",
              self.insert_recording)
-        b = ebtn("checkpoint", "\u25c6 Checkpoint", "", self.add_checkpoint_dialog)
+        cp_menu = QMenu(self)
+        cp_menu.addAction("\u25c6 Screen checkpoint at the playhead\u2026", self.add_checkpoint_dialog)
+        cp_menu.addAction("\U0001f4f7 Send a screenshot at the playhead\u2026",
+                          lambda: self.add_checkpoint_dialog(photo=True))
+        b = ebtn("checkpoint", "\u25c6 Checkpoint", "", self.add_checkpoint_dialog, menu=cp_menu)
         b.setStyleSheet(f"QToolButton {{ color: {theme.GREEN}; }}")
         erow.addSpacing(6)
         more = QMenu(self)
@@ -615,7 +634,9 @@ class MainWindow(QMainWindow):
         self._edit_buttons["checkpoint"].setToolTip(
             "Add a screen checkpoint at the playhead: a picture of how the screen should look at that moment. "
             "During playback the macro checks it and stops (with an alert) if the screen looks wrong."
-            + (f"\n{cp} adds one straight away, also while recording or playing." if cp else ""))
+            + (f"\n{cp} adds one straight away, also while recording or playing." if cp else "")
+            + "\nThe arrow adds a screenshot point instead: it sends a picture of the screen to your phone "
+              "when playback gets there.")
 
     def _hk(self, action):
         return K.format_hotkey(self.settings.hotkeys.get(action, ""))
@@ -1038,6 +1059,8 @@ class MainWindow(QMainWindow):
         m.addAction("Insert pause here…", lambda: (self.timeline.set_playhead(t, emit=True), self.insert_pause()))
         m.addAction("\u25c6 Add checkpoint here…", lambda: (self.timeline.set_playhead(t, emit=True),
                                                             self.add_checkpoint_dialog()))
+        m.addAction("\U0001f4f7 Send a screenshot here…", lambda: (self.timeline.set_playhead(t, emit=True),
+                                                                        self.add_checkpoint_dialog(photo=True)))
         m.addSeparator()
         a = m.addAction("Preview selection", self.play_selection)
         a.setEnabled(bool(sel))
@@ -1310,6 +1333,7 @@ class MainWindow(QMainWindow):
         self._play_duration = max(M.duration(events), 1e-6)
         self._play_runs = repeats
         self._resume_at = resume_at if 0.0 < resume_at < M.duration(events) else 0.0
+        start_text = self._start_text(events, repeats, delay, offset)
         first_run = M.resume_from(events, self._resume_at) if self._resume_at else None
         b = self.bridge
         events, first_run = self._prepare_for_playback(events, first_run)
@@ -1336,6 +1360,11 @@ class MainWindow(QMainWindow):
         self.state = PLAYING
         self._play_started = time.time()
         self._last_run = 0
+        self._play_preview = preview
+        self._play_t0 = self._run_t0 = time.time()
+        self._run_end = None
+        if not preview and s.notify_on_start:
+            self._phone("▶️ Playback started", start_text)
         if s.hide_while_playing and not preview:
             self._hide_for_task()
         if self._runner:
@@ -1346,9 +1375,72 @@ class MainWindow(QMainWindow):
     def _run_text(self, run, total):
         return f"Run {run:,} of {'∞' if total == 0 else f'{total:,}'}"
 
+    # ----------------------------------------------- phone progress log
+    def _macro_name(self) -> str:
+        return os.path.basename(self.file_path) if self.file_path else "Untitled macro"
+
+    def _phone(self, title: str, message: str, image=b"", priority: str = "default", droppable: bool = False,
+               ping: bool = False, on_done=None) -> bool:
+        """Queue a phone message; messages go out one by one, in order. False if alerts are off."""
+        cfg = notify.config_from_settings(self.settings)
+        if not notify.enabled(cfg):
+            return False
+        self.outbox.put(cfg, title, message, image, priority=priority, ping=ping, droppable=droppable,
+                        on_done=on_done or self.bridge.log_sent.emit)
+        return True
+
+    def _on_log_sent(self, ok: bool, error: str):
+        if not ok:
+            self.sb_screen.setText(f"⚠ Phone message failed: {error}")
+
+    def _start_text(self, events, repeats, delay, offset) -> str:
+        """What the "playback started" message says."""
+        parts = ["runs forever" if repeats == 0 else f"{repeats:,} run{'s' if repeats != 1 else ''}"]
+        if delay > 0 and repeats != 1:
+            parts.append(f"{fmt_duration(delay)} between runs")
+        parts.append(f"{fmt_duration(M.duration(events))} each")
+        speed = self.spin_speed.value()
+        if abs(speed - 1.0) > 1e-6:
+            parts.append(f"speed {speed:g}×")
+        txt = f"{self._macro_name()}: " + ", ".join(parts) + "."
+        if offset > 0:
+            txt += f" Only the selection {fmt_time(offset, 1)}–{fmt_time(offset + M.duration(events), 1)}."
+        if self._resume_at:
+            txt += f" Starting at {fmt_time(offset + self._resume_at, 1)}."
+        cps = self._checkpoints()
+        refs = [e.ref for e in events if e.kind == CHECK and e.ref in cps]
+        if refs and self.chk_checks.isChecked():
+            compare = sum(1 for r in refs if V.compares(cps[r]))
+            photos = sum(1 for r in refs if V.sends(cps[r]))
+            bits = []
+            if compare:
+                bits.append(f"{compare} checkpoint{'s' if compare != 1 else ''}")
+            if photos:
+                bits.append(f"{photos} screenshot{'s' if photos != 1 else ''}")
+            if bits:
+                txt += " Each run: " + " and ".join(bits) + "."
+        return txt
+
+    def _on_run_started(self, run, total):
+        now = time.time()
+        took = ((self._run_end or now) - self._run_t0) if run > 1 else None
+        self._run_t0, self._run_end = now, None
+        s = self.settings
+        if self._play_preview or not s.notify_each_run or (run == 1 and s.notify_on_start):
+            return
+        txt = self._macro_name()
+        if took is None:
+            txt += ": starting."
+        else:
+            txt += (f": run {run - 1:,} took {fmt_duration(took)}, "
+                    f"{fmt_duration(now - self._play_t0)} since the start.")
+        self._phone(f"\U0001f501 {self._run_text(run, total)}", txt, priority="low", droppable=True)
+
     def _on_progress(self, run, total, t):
         if self.state != PLAYING:
             return
+        if run != self._last_run:
+            self._on_run_started(run, total)
         self._last_run = run
         if run == 1:
             t += self._resume_at  # the first run started part-way in
@@ -1366,6 +1458,8 @@ class MainWindow(QMainWindow):
     def _on_waiting(self, remaining, next_run):
         if self.state != PLAYING:
             return
+        if self._run_end is None:
+            self._run_end = time.time()  # the run before the wait ended: its length leaves the wait out
         total = self._play_runs
         txt = f"Next run ({next_run:,} of {'∞' if total == 0 else f'{total:,}'}) in {fmt_time(remaining, 0) if remaining >= 60 else f'{remaining:.1f}s'}"
         self.lbl_run.setText(txt)
@@ -1396,12 +1490,15 @@ class MainWindow(QMainWindow):
                 self.osd.show_message(f"STOPPED  \u00b7  checkpoint \u201c{failure.name}\u201d failed", theme.RED,
                                       hide_after_ms=8000)
             self._show_failure(failure)
-        elif completed and self.settings.notify_on_finish:
-            cfg = notify.config_from_settings(self.settings)
-            if notify.enabled(cfg):
-                name = os.path.basename(self.file_path) if self.file_path else "The macro"
-                notify.send_async(cfg, "Macro finished", f"{name} finished {runs:,} run(s).", priority="default",
-                                  tags="white_check_mark", on_done=self.bridge.notified.emit)
+        elif self.settings.notify_on_finish and not self._play_preview and not self._closing:
+            took = fmt_duration(time.time() - self._play_t0)
+            if completed:
+                self._phone("✅ Macro finished",
+                            f"{self._macro_name()} finished {runs:,} run{'s' if runs != 1 else ''} in {took}.")
+            else:
+                self._phone("⏹️ Macro stopped",
+                            f"{self._macro_name()} was stopped during {self._run_text(runs, self._play_runs).lower()}, "
+                            f"{fmt_time(self.timeline.playhead, 1)} into the macro, after {took}.")
 
     def stop_playback(self):
         if self.player:
@@ -1419,9 +1516,13 @@ class MainWindow(QMainWindow):
     def _checkpoints(self) -> dict:
         return M.checkpoints_of(self.meta)
 
-    def _next_checkpoint_name(self) -> str:
-        n = sum(1 for e in self.events if e.kind == CHECK) + len(self._rec_checkpoints) + 1
-        return f"Checkpoint {n}"
+    def _next_checkpoint_name(self, photo: bool = False) -> str:
+        cps = self._checkpoints()
+        refs = [e.ref for e in self.events if e.kind == CHECK]
+        photos = sum(1 for r in refs if r in cps and not V.compares(cps[r]))
+        if photo:
+            return f"Screenshot {photos + 1}"
+        return f"Checkpoint {len(refs) - photos + len(self._rec_checkpoints) + 1}"
 
     @contextlib.contextmanager
     def _hotkeys_paused(self):
@@ -1470,10 +1571,15 @@ class MainWindow(QMainWindow):
             return None, None
         return img, mon
 
-    def _new_checkpoint_spec(self, img, mon) -> dict:
+    def _new_checkpoint_spec(self, img, mon, photo: bool = False) -> dict:
+        """``photo``: a screenshot point (sends a picture, doesn't compare)."""
         s = self.settings
-        return V.new_checkpoint(img, mon, winutil.primary_screen_rect(), self._next_checkpoint_name(),
+        spec = V.new_checkpoint(img, mon, winutil.primary_screen_rect(), self._next_checkpoint_name(photo),
                                 s.checkpoint_threshold, s.checkpoint_timeout)
+        if photo:
+            spec["compare"] = False
+            spec["send"] = True
+        return spec
 
     # Checkpoint areas are stored in the macro's coordinates, like its mouse
     # positions, and go through the same Record on / Play on screen mapping.
@@ -1578,8 +1684,9 @@ class MainWindow(QMainWindow):
             self._note(f"\u25c6 {spec['name']} added at {fmt_time(t, 2)}  \u00b7  double-click it on the "
                        "timeline to choose the area")
 
-    def add_checkpoint_dialog(self, *_):
-        """Button / menu: picture of the screen now, edited before it's added at the playhead."""
+    def add_checkpoint_dialog(self, *_, photo: bool = False):
+        """Button / menu: picture of the screen now, edited before it's added at the playhead.
+        ``photo``: a screenshot point, which sends a picture instead of comparing."""
         if self.state != IDLE:
             return
         t = self.timeline.playhead
@@ -1592,14 +1699,19 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, "Couldn't take a screenshot.")
             return
         with self._hotkeys_paused():
-            dlg = CheckpointDialog(self._spec_to_macro(self._new_checkpoint_spec(img, mon)), t,
-                                   self._grab_without_us, self._checkpoint_to_screen, self, is_new=True)
+            dlg = CheckpointDialog(self._spec_to_macro(self._new_checkpoint_spec(img, mon, photo)), t,
+                                   self._grab_without_us, self._checkpoint_to_screen, self, is_new=True,
+                                   max_time=max(t, M.duration(self.events)),
+                                   notify_cfg=notify.config_from_settings(self.settings))
             if dlg.exec() != QDialog.Accepted:
                 return
         ref = V.new_id()
-        self.apply_edit(M.add_event(self.events, Event(t, CHECK, ref=ref)), "Add checkpoint",
-                        M.with_checkpoints(self.meta, {ref: dlg.result_spec()}))
-        self.lbl_status.setText(f"Checkpoint added at {fmt_time(t, 2)}")
+        spec, t = dlg.result_spec(), dlg.result_time()
+        self.apply_edit(M.add_event(self.events, Event(t, CHECK, ref=ref)),
+                        "Add checkpoint" if V.compares(spec) else "Add screenshot point",
+                        M.with_checkpoints(self.meta, {ref: spec}))
+        what = "Checkpoint" if V.compares(spec) else "Screenshot point"
+        self.lbl_status.setText(f"{what} added at {fmt_time(t, 2)}")
 
     def edit_checkpoint(self, index: int):
         if self.state != IDLE or not 0 <= index < len(self.events) or self.events[index].kind != CHECK:
@@ -1613,13 +1725,17 @@ class MainWindow(QMainWindow):
                 self.apply_edit(M.delete_indices(self.events, [index]), "Delete checkpoint")
             return
         with self._hotkeys_paused():
-            dlg = CheckpointDialog(spec, e.t, self._grab_without_us, self._checkpoint_to_screen, self)
+            dlg = CheckpointDialog(spec, e.t, self._grab_without_us, self._checkpoint_to_screen, self,
+                                   max_time=max(e.t, M.duration(self.events)),
+                                   notify_cfg=notify.config_from_settings(self.settings))
             r = dlg.exec()
         if r == DELETE:
             self.apply_edit(M.delete_indices(self.events, [index]), "Delete checkpoint")
             self.timeline.select_events([])
         elif r == QDialog.Accepted:
-            self.apply_edit(self.events, "Edit checkpoint", M.with_checkpoints(self.meta, {e.ref: dlg.result_spec()}))
+            t = dlg.result_time()
+            events = self.events if t == e.t else M.set_event(self.events, index, e.at(t))
+            self.apply_edit(events, "Edit checkpoint", M.with_checkpoints(self.meta, {e.ref: dlg.result_spec()}))
 
     def _checkpoint_index(self, ref: str, t: float) -> Optional[int]:
         found = [i for i, e in enumerate(self.events) if e.kind == CHECK and e.ref == ref]
@@ -1649,9 +1765,21 @@ class MainWindow(QMainWindow):
 
     def _on_check_result(self, res):
         if res.passed:
+            if res.photo is not None or res.error:  # a checkpoint that sends a picture
+                self._send_photo(res)
             return
         self._check_failure = res
         self._alert_failure(res)
+
+    def _send_photo(self, res):
+        lines = [self._failure_when(res) + "."]
+        if res.compared:
+            lines.append(f"✓ The screen matches ({res.score * 100:.0f}%).")
+        if res.error:
+            lines.append(f"⚠ {res.error}.")
+        img = res.photo
+        self._phone(f"\U0001f4f7 {res.name}", "\n".join(lines),
+                    (lambda: V.image_bytes(img, PHOTO_MAX_SIDE)) if img is not None else b"")
 
     def _failure_when(self, res) -> str:
         total = self._play_runs
@@ -1668,20 +1796,16 @@ class MainWindow(QMainWindow):
         msg = f"{res.summary}.\n{self._failure_when(res)}."
         if self.tray.isVisible():
             self.tray.showMessage(title, msg, QSystemTrayIcon.Warning, 15000)
-        cfg = notify.config_from_settings(self.settings)
-        if not notify.enabled(cfg):
-            self._alert_text = "Phone alerts are off. Set them up in Settings \u2192 Checkpoints & alerts."
-            return
         image = b""
-        if self.settings.notify_attach_screenshot:
-            img = res.screenshot if res.screenshot is not None else res.actual
-            try:
-                image = V.image_bytes(img)
-            except Exception:
-                image = b""
-        self._alert_text = "Sending phone alert\u2026"
-        notify.send_async(cfg, title, msg, image, priority="high", tags="warning",
-                          on_done=self.bridge.notified.emit)
+        img = res.screenshot if res.screenshot is not None else res.actual
+        if self.settings.notify_attach_screenshot and img is not None:
+            image = lambda: V.image_bytes(img)  # noqa: E731  (encoded on the sending thread)
+        # Discord: pings the people in Settings, so it stands out from the progress log
+        if self._phone("\U0001f6a8 " + title, msg, image, priority="high", ping=True,
+                       on_done=self.bridge.notified.emit):
+            self._alert_text = "Sending phone alert\u2026"
+        else:
+            self._alert_text = "Phone alerts are off. Set them up in Settings \u2192 Checkpoints & alerts."
 
     def _on_notified(self, ok: bool, error: str):
         self._alert_text = "\u2713 Phone alert sent." if ok else f"\u26a0 Phone alert failed: {error}"
@@ -1847,6 +1971,11 @@ class MainWindow(QMainWindow):
         self.close()
 
     def _shutdown(self):
+        if self.state == PLAYING and not self._play_preview and self.settings.notify_on_finish:
+            self._phone("⏹️ Macro stopped",
+                        f"{self._macro_name()} was stopped during "
+                        f"{self._run_text(self._last_run, self._play_runs).lower()}: the app was closed.")
+        self._closing = True
         self.stop_all()
         if self.recorder:
             self.recorder.stop()
@@ -1857,3 +1986,4 @@ class MainWindow(QMainWindow):
         self.osd.close()
         self.tray.hide()
         self._save_playback_options()
+        self.outbox.flush(3.0)  # let the last messages (e.g. "stopped") get out

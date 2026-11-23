@@ -158,3 +158,47 @@ def test_encode_decode_and_crop():
     assert max(stored.width(), stored.height()) == V.STORE_MAX_SIDE
     crop = V.reference_crop(spec)
     assert (crop.width(), crop.height()) == (640, 320)
+
+
+def test_photo_checkpoint_sends_its_area_and_never_stops():
+    img = screen_image()
+    other = screen_image(color="#40e040")              # doesn't match, but it isn't compared
+    spec = dict(spec_for(img, [100, 50, 400, 300]), compare=False, send=True)
+    r, results, statuses = make_runner(lambda: other, spec)
+    assert r.check("a", run=2, t=94.0) is True
+    res = results[-1]
+    assert res.passed and not res.compared and not res.error and not statuses
+    assert (res.photo.width(), res.photo.height()) == (400, 300)
+    assert (res.run, res.t) == (2, 94.0)
+
+
+def test_photo_checkpoint_reports_a_failed_screenshot():
+    img = screen_image()
+    spec = dict(spec_for(img, [100, 50, 400, 300]), compare=False, send=True)
+    r = V.CheckpointRunner({"a": spec}, capture=lambda rect: img.copy(*rect))
+    results = []
+    r.on_result = results.append
+    assert r.prepare(["a"]) == []
+    r.capture = lambda rect: None
+    assert r.check("a") is True
+    assert results[-1].photo is None and "screenshot" in results[-1].error
+
+
+def test_matching_checkpoint_can_send_a_picture_too():
+    img = screen_image()
+    r, results, _ = make_runner(lambda: img, dict(spec_for(img, [250, 150, 300, 200]), send=True))
+    assert r.check("a") is True
+    assert results[-1].passed and results[-1].compared and results[-1].photo is not None
+    r, results, _ = make_runner(lambda: img, spec_for(img, [250, 150, 300, 200]))
+    assert r.check("a") is True and results[-1].photo is None   # "send" off: nothing to send
+
+
+def test_checkpoint_kinds_described():
+    img = screen_image()
+    spec = spec_for(img, [0, 0, 10, 10])
+    assert V.compares(spec) and not V.sends(spec)
+    assert "sends" not in V.describe(spec)
+    assert V.describe(dict(spec, send=True)).endswith("sends a picture")
+    assert V.describe(dict(spec, compare=False, send=True)) == "sends a picture of the screen"
+    assert "does nothing" in V.describe(dict(spec, compare=False))
+    assert not V.compares(None) and V.describe(None) == "missing picture"

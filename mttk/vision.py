@@ -192,6 +192,10 @@ def decode_image(text: str):
 #   threshold    % of the area that must look the same
 #   timeout      seconds to keep retrying before it counts as failed
 #   shift        pixels the picture may be off by and still pass
+#   compare      False: don't compare, never stop the macro (a "photo" checkpoint); default True
+#   send         True: send a picture of the screen to the phone when playback gets here.
+#                Photo checkpoints send their area; comparing ones send the whole monitor
+#                with the area outlined. Default False
 
 def new_id() -> str:
     return secrets.token_hex(4)
@@ -231,12 +235,26 @@ def reference_crop(spec: dict):
     return img.copy(*region_in_image(spec, img.width(), img.height()))
 
 
+def compares(spec: Optional[dict]) -> bool:
+    """Does this checkpoint compare the screen (and stop the macro on a mismatch)?"""
+    return bool(spec) and spec.get("compare", True) is not False
+
+
+def sends(spec: Optional[dict]) -> bool:
+    """Does this checkpoint send a picture of the screen when playback gets here?"""
+    return bool(spec) and bool(spec.get("send"))
+
+
 def describe(spec: Optional[dict]) -> str:
     if not spec:
         return "missing picture"
+    if not compares(spec):
+        return "sends a picture of the screen" if sends(spec) else "does nothing (comparing and sending are off)"
     txt = f"≥{spec.get('threshold', DEFAULT_THRESHOLD)}% match, wait up to {spec.get('timeout', DEFAULT_TIMEOUT):g}s"
     if spec.get("shift"):
         txt += f", ±{spec['shift']}px"
+    if sends(spec):
+        txt += ", sends a picture"
     return txt
 
 
@@ -258,6 +276,9 @@ class CheckResult:
     expected: object = None      # QImage: the reference area
     actual: object = None        # QImage: the same area on screen now
     screenshot: object = None    # QImage: the whole monitor with the area marked (failures)
+    compared: bool = True        # False: a photo checkpoint (nothing compared, always passes)
+    photo: object = None         # QImage to send to the phone (checkpoints with "send" on), None if
+                                 # it couldn't be taken (then ``error`` says so)
 
     @property
     def summary(self) -> str:
@@ -350,6 +371,14 @@ class CheckpointRunner:
             return True
         spec = p.spec
         name = spec.get("name") or "Checkpoint"
+        if not compares(spec):
+            if sends(spec):
+                start = time.perf_counter()
+                photo = self._photo(p)
+                self.on_result(CheckResult(ref, name, True, 1.0, 0.0, run=run, t=t,
+                                           waited=time.perf_counter() - start, compared=False, photo=photo,
+                                           error="" if photo is not None else "Couldn't take a screenshot"))
+            return True
         threshold = max(0.0, min(1.0, spec.get("threshold", DEFAULT_THRESHOLD) / 100.0))
         start = time.perf_counter()
         deadline = start + max(0.0, float(spec.get("timeout", DEFAULT_TIMEOUT)))
@@ -367,8 +396,13 @@ class CheckpointRunner:
             if score > best[0]:
                 best = (score, dx, dy)
             if score >= threshold:
-                self.on_result(CheckResult(ref, name, True, score, threshold, self._to_px(p, dx, dy), run, t,
-                                           time.perf_counter() - start))
+                res = CheckResult(ref, name, True, score, threshold, self._to_px(p, dx, dy), run, t,
+                                  time.perf_counter() - start)
+                if sends(spec):
+                    res.photo = self._marked_screenshot(p, (61, 220, 151))
+                    if res.photo is None:
+                        res.error = "Couldn't take a screenshot"
+                self.on_result(res)
                 return True
             if self.cancel.is_set():
                 return True
@@ -398,8 +432,16 @@ class CheckpointRunner:
     def _to_px(p: _Prepared, dx: int, dy: int) -> Tuple[int, int]:
         return round(dx / p.fx), round(dy / p.fy)
 
-    def _marked_screenshot(self, p: _Prepared):
-        """The whole monitor right now, with the checked area outlined in red."""
+    def _photo(self, p: _Prepared):
+        """The checkpoint's area on screen right now (a photo checkpoint's picture)."""
+        try:
+            img = self.capture(p.rect)
+        except Exception:
+            return None
+        return None if img is None or img.isNull() else img
+
+    def _marked_screenshot(self, p: _Prepared, color=(255, 60, 80)):
+        """The whole monitor right now, with the checked area outlined (red by default)."""
         try:
             from PySide6.QtGui import QColor, QPainter, QPen
             from . import winutil
@@ -409,7 +451,7 @@ class CheckpointRunner:
             if img is None or img.isNull():
                 return None
             painter = QPainter(img)
-            pen = QPen(QColor(255, 60, 80), max(3, mon[2] // 400))
+            pen = QPen(QColor(*color), max(3, mon[2] // 400))
             painter.setPen(pen)
             painter.drawRect(x - mon[0], y - mon[1], w, h)
             painter.end()

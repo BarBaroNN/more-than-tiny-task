@@ -69,6 +69,8 @@ class EventTableModel(QAbstractTableModel):
                     return f"{e.button.title()} {'down' if e.pressed else 'up'}"
                 if e.kind == KEY:
                     return f"Key {'down' if e.pressed else 'up'}"
+                if e.kind == CHECK and self.checkpoints.get(e.ref) and not vision.compares(self.checkpoints[e.ref]):
+                    return "Screenshot"
                 return KIND_NAMES.get(e.kind, e.kind)
             if c == 4:
                 return "" if e.kind in NO_POSITION else e.x
@@ -85,6 +87,8 @@ class EventTableModel(QAbstractTableModel):
                 return ""
         if role == Qt.ForegroundRole:
             if c == 3:
+                if e.kind == CHECK and self.checkpoints.get(e.ref) and not vision.compares(self.checkpoints[e.ref]):
+                    return QColor(theme.ACCENT)   # screenshot point, blue like on the timeline
                 return QColor(theme.TRACK_COLORS.get(e.kind, theme.TEXT))
             if c in (0, 2):
                 return QColor(theme.TEXT_FAINT)

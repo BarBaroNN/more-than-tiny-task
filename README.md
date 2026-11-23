@@ -104,7 +104,13 @@ When a checkpoint fails, the macro **stops, releases every held key and mouse bu
 - **Telegram:** create a bot with @BotFather, paste its token, send the bot a message and press *Find my chat ID*.
 - **Discord:** paste a channel webhook URL.
 
-Press *Send a test alert* to check it works. You can also get a message when a macro finishes normally. Tokens and webhooks are stored in the app's settings on this PC, never in `.mttk` files, so sharing a macro doesn't share them.
+Press *Send a test alert* to check it works. Tokens and webhooks are stored in the app's settings on this PC, never in `.mttk` files, so sharing a macro doesn't share them.
+
+**Discord pings on errors.** *Ping on errors* (default `@everyone`) is mentioned in every checkpoint-failure alert, so errors stand out from the progress log and ring your phone even if the channel only notifies for mentions. Use `@here`, your user ID (Discord settings → Advanced → Developer Mode, then right-click your name → *Copy User ID*) to ping only you, `&` plus a role ID for a role, or leave it empty. Other messages never ping.
+
+**Progress log.** Under *Progress log* you can also get a message when playback starts, at the start of every run (with how long the last run took) and when it finishes or is stopped. Messages arrive in order; if runs are only a few seconds long, some run messages are skipped so the log keeps up.
+
+**Screenshot points: a picture at a set moment.** To get a picture of the screen at, say, 1:34 into the macro, right-click the timeline there and choose **📷 Send a screenshot here** (or use the arrow next to **◆ Checkpoint**). Type the exact time in the *at* box, drag over the part of the screen to send (or keep the whole screen) and press *Send a test picture now* to try it. Every time playback reaches that moment, the picture is sent with the run number. Screenshot points show up as blue dots on the *Checks* track and never pause or stop the macro. Any checkpoint can do both: tick *Send a picture of the screen* on a normal checkpoint and it sends the whole screen, with the checked area outlined, whenever it matches.
 
 > Checkpoints compare pictures; they don't read text. The app's own window and the REC / PLAY indicator are left out of the screenshots. Some games in exclusive full-screen mode show up black in screenshots: use borderless / windowed mode if *Test against the screen now* shows a black picture.
 

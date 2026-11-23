@@ -102,3 +102,100 @@ def test_send_reports_http_errors():
     with pytest.raises(N.NotifyError, match="403.*forbidden topic"):
         N.send(cfg, "T", "M", timeout=5)
     srv.server_close()
+
+
+DISCORD = {"service": "discord", "discord_webhook": "https://discord.com/api/webhooks/1/x",
+           "discord_mention": "@everyone"}
+
+
+def test_discord_ping_only_when_asked():
+    plain = json.loads(N.build_request(DISCORD, "Run 2 of 5", "log").body)
+    assert plain["content"] == "**Run 2 of 5**\nlog"
+    assert plain["allowed_mentions"] == {"parse": []}           # logs never ping
+    err = json.loads(N.build_request(DISCORD, "Macro stopped", "54% match", ping=True).body)
+    assert err["content"] == "@everyone **Macro stopped**\n54% match"
+    assert err["allowed_mentions"] == {"parse": ["everyone"]}
+    # with a picture the same payload goes in payload_json
+    r = N.build_request(DISCORD, "Macro stopped", "x", image=b"IMG", ping=True)
+    assert b"@everyone **Macro stopped**" in r.body and b'"everyone"' in r.body
+
+
+def test_discord_mention_parsing():
+    assert N.discord_mention("") == ("", {"parse": []})
+    who, allowed = N.discord_mention("here, <@!123456789012345678> &987654321 junk 123456789012345678")
+    assert who == "@here <@123456789012345678> <@&987654321>"
+    assert allowed == {"parse": ["everyone"], "users": ["123456789012345678"], "roles": ["987654321"]}
+    assert N.mention_problem("@everyone <@&55555>") == ""
+    assert "junk" in N.mention_problem("@everyone junk")
+    # a ping with nothing configured is just the message
+    cfg = {**DISCORD, "discord_mention": ""}
+    assert json.loads(N.build_request(cfg, "T", "M", ping=True).body)["content"] == "**T**\nM"
+
+
+def test_outbox_sends_in_order_and_waits_out_rate_limits():
+    sent, calls = [], []
+
+    def sender(cfg, title, message, image, priority, tags, ping=False):
+        calls.append(title)
+        if title == "two" and calls.count("two") == 1:
+            raise N.NotifyError("HTTP 429: slow down", retry_after=0.05)
+        sent.append((title, image, ping))
+
+    done = []
+    box = N.Outbox(sender)
+    box.put(DISCORD, "one", "m")
+    box.put(DISCORD, "two", "m", image=lambda: b"JPEG", on_done=lambda ok, err: done.append(ok))
+    box.put(DISCORD, "three", "m", ping=True)
+    assert box.flush(5)
+    assert sent == [("one", b"", False), ("two", b"JPEG", False), ("three", b"", True)]
+    assert calls.count("two") == 2 and done == [True]
+
+
+def test_outbox_drops_oldest_logs_when_behind_but_never_alerts():
+    gate = threading.Event()
+    sent = []
+
+    def sender(cfg, title, message, image, priority, tags, ping=False):
+        gate.wait(5)
+        sent.append(title)
+
+    box = N.Outbox(sender, max_backlog=2)
+    box.put(DISCORD, "start", "m")                 # being sent (blocked on the gate)
+    for i in range(1, 6):
+        box.put(DISCORD, f"run {i}", "m", droppable=True)
+    box.put(DISCORD, "alert", "m", ping=True)
+    gate.set()
+    assert box.flush(5)
+    assert sent[0] == "start" and sent[-1] == "alert"
+    assert [t for t in sent if t.startswith("run")] == ["run 4", "run 5"]
+    assert box.dropped == 3
+
+
+def test_outbox_reports_failures():
+    def sender(*a, **kw):
+        raise N.NotifyError("HTTP 404: Unknown Webhook")
+
+    done = []
+    box = N.Outbox(sender)
+    box.put(DISCORD, "x", "m", on_done=lambda ok, err: done.append((ok, err)))
+    assert box.flush(5)
+    assert done == [(False, "HTTP 404: Unknown Webhook")]
+
+
+def test_rate_limit_answer_becomes_retry_after():
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(429)
+            self.end_headers()
+            self.wfile.write(b'{"message": "You are being rate limited.", "retry_after": 1.25, "global": false}')
+
+        def log_message(self, *a):
+            pass
+
+    srv = serve_once(Handler)
+    cfg = {**NTFY, "ntfy_server": f"http://127.0.0.1:{srv.server_port}"}
+    with pytest.raises(N.NotifyError) as info:
+        N.send(cfg, "T", "M", timeout=5)
+    srv.server_close()
+    assert info.value.retry_after == 1.25

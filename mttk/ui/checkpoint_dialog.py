@@ -4,16 +4,49 @@ from __future__ import annotations
 import copy
 from typing import Callable, Optional
 
-from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import (QDialog, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtCore import QObject, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPixmap, QValidator
+from PySide6.QtWidgets import (QCheckBox, QDialog, QDoubleSpinBox, QFormLayout, QGridLayout, QHBoxLayout,
+                               QLabel, QLineEdit, QPushButton, QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
 
+from .. import notify
 from .. import vision as V
 from . import theme
-from .timeline import fmt_time
+from .timeline import fmt_time, parse_time
 
 DELETE = 2  # dialog result: delete this checkpoint
+
+
+class TimeSpin(QDoubleSpinBox):
+    """A time in the macro, shown and typed as 1:34.50 (or 94.5)."""
+
+    def __init__(self, value: float, maximum: float, parent=None):
+        super().__init__(parent)
+        self.setDecimals(3)
+        self.setRange(0.0, max(maximum, value))
+        self.setSingleStep(0.1)
+        self.setValue(value)
+        self.setMinimumWidth(110)
+
+    def textFromValue(self, v: float) -> str:
+        return fmt_time(v, 2)
+
+    def valueFromText(self, text: str) -> float:
+        v = parse_time(text)
+        return self.value() if v is None else v
+
+    def validate(self, text: str, pos: int):
+        v = parse_time(text)
+        ok = v is not None and v <= self.maximum() + 1e-9
+        return QValidator.Acceptable if ok else QValidator.Intermediate, text, pos
+
+    def fixup(self, text: str) -> str:
+        return self.textFromValue(self.value())
+
+
+class _Relay(QObject):
+    """Brings the result of a test message back to the GUI thread."""
+    done = Signal(bool, str)
 
 
 class RegionPicker(QWidget):
@@ -117,19 +150,30 @@ def _scaled(img: Optional[QImage], w: int, h: int) -> QPixmap:
 
 
 class CheckpointDialog(QDialog):
-    """Edit one checkpoint: name, area, how strict, how long to wait.
+    """Edit one checkpoint: name, time, area, what it does, how strict, how long to wait.
 
     ``grab(rect)`` takes a screenshot without our own windows in it and
     ``to_screen(rect, screen)`` maps checkpoint coordinates to this screen.
+    ``max_time`` is the latest time the checkpoint can be moved to and
+    ``notify_cfg`` the phone alert settings (for "send a test picture").
     """
 
     def __init__(self, spec: dict, at_time: float, grab: Callable, to_screen: Callable,
-                 parent=None, is_new: bool = False):
+                 parent=None, is_new: bool = False, max_time: Optional[float] = None,
+                 notify_cfg: Optional[dict] = None):
         super().__init__(parent)
-        self.setWindowTitle("New screen checkpoint" if is_new else "Screen checkpoint")
         self.spec = copy.deepcopy(spec)
+        photo = not V.compares(self.spec)
+        if is_new:
+            self.setWindowTitle("New screenshot point" if photo else "New screen checkpoint")
+        else:
+            self.setWindowTitle("Screen checkpoint")
         self._grab_screen = grab
         self.to_screen = to_screen
+        self._at_time = at_time
+        self._notify_cfg = dict(notify_cfg or {})
+        self._relay = _Relay(self)
+        self._relay.done.connect(self._test_sent)
         self.setMinimumWidth(820)
 
         lay = QVBoxLayout(self)
@@ -141,7 +185,12 @@ class CheckpointDialog(QDialog):
         self.name.setPlaceholderText("Name, e.g. Shop window open")
         top.addWidget(QLabel("Name"))
         top.addWidget(self.name, 1)
-        when = QLabel(f"at {fmt_time(at_time, 2)} in the macro")
+        top.addSpacing(8)
+        top.addWidget(QLabel("at"))
+        self.time = TimeSpin(at_time, at_time if max_time is None else max_time)
+        self.time.setToolTip("When in the macro this happens. Type a time like 1:34 or 94.5.")
+        top.addWidget(self.time)
+        when = QLabel("in the macro")
         when.setObjectName("Dim")
         top.addWidget(when)
         lay.addLayout(top)
@@ -151,11 +200,10 @@ class CheckpointDialog(QDialog):
         self.picker.changed.connect(self._region_changed)
         lay.addWidget(self.picker, 1)
 
-        hint = QLabel("Drag over the part of the screen that must look like this when the macro gets here. "
-                      "Leave out things that change on their own (chat, timers, animations).")
-        hint.setObjectName("Faint")
-        hint.setWordWrap(True)
-        lay.addWidget(hint)
+        self.hint = QLabel("")
+        self.hint.setObjectName("Faint")
+        self.hint.setWordWrap(True)
+        lay.addWidget(self.hint)
 
         row = QHBoxLayout()
         b = QPushButton("Whole screen")
@@ -172,6 +220,22 @@ class CheckpointDialog(QDialog):
         form = QFormLayout()
         form.setHorizontalSpacing(14)
         form.setVerticalSpacing(8)
+        self.compare = QCheckBox("Compare the screen, and stop the macro if it doesn't look like this")
+        self.compare.setChecked(V.compares(self.spec))
+        self.compare.setToolTip("Off: the macro never pauses or stops here (use it to just send a picture).")
+        self.send = QCheckBox("Send a picture of the screen to your phone (Discord, Telegram or ntfy)")
+        self.send.setChecked(V.sends(self.spec))
+        self.send_note = QLabel("")
+        self.send_note.setObjectName("Faint")
+        self.send_note.setWordWrap(True)
+        what = QWidget()
+        wv = QVBoxLayout(what)
+        wv.setContentsMargins(0, 0, 0, 0)
+        wv.setSpacing(4)
+        wv.addWidget(self.compare)
+        wv.addWidget(self.send)
+        wv.addWidget(self.send_note)
+        form.addRow("When the macro gets here", what)
         self.threshold = QSpinBox()
         self.threshold.setRange(10, 100)
         self.threshold.setSuffix(" %")
@@ -197,14 +261,16 @@ class CheckpointDialog(QDialog):
         lay.addLayout(form)
 
         test = QHBoxLayout()
-        b = QPushButton("Test against the screen now")
-        b.setToolTip("Compare the area with what is on screen right now (this window is left out).")
-        b.clicked.connect(self._test)
-        test.addWidget(b)
+        self.test_btn = QPushButton("Test against the screen now")
+        self.test_btn.clicked.connect(self._test)
+        test.addWidget(self.test_btn)
         self.test_result = QLabel("")
         self.test_result.setWordWrap(True)
         test.addWidget(self.test_result, 1)
         lay.addLayout(test)
+        self.compare.toggled.connect(self._mode_changed)
+        self.send.toggled.connect(self._mode_changed)
+        self._mode_changed()
 
         buttons = QHBoxLayout()
         if not is_new:
@@ -215,7 +281,7 @@ class CheckpointDialog(QDialog):
         buttons.addStretch(1)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
-        ok = QPushButton("Add checkpoint" if is_new else "OK")
+        ok = QPushButton(("Add screenshot point" if photo else "Add checkpoint") if is_new else "OK")
         ok.setObjectName("Primary")
         ok.setDefault(True)
         ok.clicked.connect(self.accept)
@@ -238,6 +304,38 @@ class CheckpointDialog(QDialog):
     def _region_changed(self):
         self.test_result.setText("")
 
+    def _mode_changed(self, *_):
+        compare, send = self.compare.isChecked(), self.send.isChecked()
+        for w in (self.threshold, self.timeout, self.shift):
+            w.setEnabled(compare)
+        if compare:
+            self.hint.setText("Drag over the part of the screen that must look like this when the macro gets "
+                              "here. Leave out things that change on their own (chat, timers, animations).")
+            self.test_btn.setText("Test against the screen now")
+            self.test_btn.setToolTip("Compare the area with what is on screen right now (this window is left out).")
+        else:
+            self.hint.setText("Drag over the part of the screen to send (Whole screen sends the whole monitor). "
+                              "The macro doesn't pause or stop here.")
+            self.test_btn.setText("Send a test picture now")
+            self.test_btn.setToolTip("Send the area as it is on screen right now (this window is left out).")
+        problem = notify.problem(self._notify_cfg) if self._notify_cfg.get("service", "none") != "none" \
+            else "Phone alerts are off"
+        if not compare and not send:
+            note = f"<span style='color:{theme.YELLOW}'>With both off, this point does nothing.</span>"
+        elif send and problem:
+            note = (f"<span style='color:{theme.YELLOW}'>{problem}: set them up in Settings → Checkpoints "
+                    "&amp; alerts, or nothing is sent.</span>")
+        elif send and compare:
+            note = "Sent when the screen matches: the whole monitor with the area outlined."
+        elif send:
+            note = "The area above is sent every time playback gets here."
+        else:
+            note = ""
+        self.send_note.setText(note)
+        self.send_note.setVisible(bool(note))
+        self.test_btn.setEnabled(compare or not problem)
+        self.test_result.setText("")
+
     def _retake(self):
         # the picture's area is in the macro's coordinates: take it where it is on screen now
         img = self._grab_screen(self.to_screen(self.picker.image_rect, self.spec.get("screen")))
@@ -255,10 +353,28 @@ class CheckpointDialog(QDialog):
         s["threshold"] = self.threshold.value()
         s["timeout"] = self.timeout.value()
         s["shift"] = self.shift.value()
+        if self.compare.isChecked():
+            s.pop("compare", None)   # the default: older versions read it the same way
+        else:
+            s["compare"] = False
+        if self.send.isChecked():
+            s["send"] = True
+        else:
+            s.pop("send", None)
         return s
 
+    def result_time(self) -> float:
+        """The (possibly edited) time of the checkpoint in the macro."""
+        v = self.time.value()
+        # untouched: keep the exact original time (the spin box rounds to milliseconds)
+        return self._at_time if abs(v - round(self._at_time, 3)) < 1e-9 else v
+
     def _test(self):
+        if not self.compare.isChecked():
+            self._send_test_picture()
+            return
         spec = dict(self.result_spec(), timeout=0.0)
+        spec.pop("send", None)   # just the comparison, no picture to send
         results = []
         runner = V.CheckpointRunner({"t": spec}, to_screen=self.to_screen, capture=self._grab_screen,
                                     on_result=results.append)
@@ -277,6 +393,30 @@ class CheckpointDialog(QDialog):
         else:
             self.test_result.setText(f"<span style='color:{theme.RED}'>✗ {res.summary}: would stop the macro"
                                      "</span>")
+
+    def _send_test_picture(self):
+        img = self._grab_screen(self.to_screen(self.picker.region, self.spec.get("screen")))
+        if img is None or img.isNull():
+            self.test_result.setText(f"<span style='color:{theme.RED}'>Couldn't take a screenshot.</span>")
+            return
+        try:
+            data = V.image_bytes(img)
+        except Exception as exc:
+            self.test_result.setText(f"<span style='color:{theme.RED}'>{exc}</span>")
+            return
+        name = self.name.text().strip() or "Screenshot"
+        self.test_btn.setEnabled(False)
+        self.test_result.setText("Sending…")
+        notify.send_async(self._notify_cfg, f"\U0001f4f7 {name} (test)",
+                          f"Test picture: this is what is sent at {fmt_time(self.time.value(), 2)} in the macro.",
+                          data, priority="default", tags="", on_done=self._relay.done.emit)
+
+    def _test_sent(self, ok: bool, error: str):
+        self.test_btn.setEnabled(True)
+        if ok:
+            self.test_result.setText(f"<span style='color:{theme.GREEN}'>✓ Sent. Check your phone.</span>")
+        else:
+            self.test_result.setText(f"<span style='color:{theme.RED}'>⚠ {error}</span>")
 
 
 class CheckFailedDialog(QDialog):

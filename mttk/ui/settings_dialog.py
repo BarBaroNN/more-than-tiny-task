@@ -6,8 +6,8 @@ import threading
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-                               QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSlider,
-                               QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
+                               QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
+                               QSlider, QSizePolicy, QSpinBox, QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
 
 from .. import keys as K
 from .. import notify
@@ -249,6 +249,11 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
+        # the alerts tab scrolls: show as much of it as the screen has room for
+        scr = (parent.screen() if parent is not None else None) or self.screen()
+        if scr is not None:
+            self.resize(max(self.sizeHint().width(), 720), max(self.sizeHint().height(),
+                                                               min(880, scr.availableGeometry().height() - 60)))
 
     # ------------------------------------------------- checkpoints & alerts
     def _alerts_tab(self):
@@ -332,6 +337,13 @@ class SettingsDialog(QDialog):
         pf.addRow("", _hint("In Discord: <b>Server settings, Integrations, Webhooks, New webhook</b>, pick a "
                             "channel and press <b>Copy webhook URL</b>. Turn on notifications for that channel "
                             "in the phone app."))
+        self.discord_mention = QLineEdit(s.notify_mention)
+        self.discord_mention.setPlaceholderText("e.g. @everyone, @here or your user ID (empty: no ping)")
+        self.discord_mention.textChanged.connect(self._mention_changed)
+        pf.addRow("Ping on errors", self.discord_mention)
+        self.mention_note = _hint("")
+        pf.addRow("", self.mention_note)
+        self._mention_changed()
         self.svc_stack.addWidget(page)
         f.addRow("", self.svc_stack)
         self.service.currentIndexChanged.connect(self._service_changed)
@@ -339,16 +351,35 @@ class SettingsDialog(QDialog):
         self.attach = QCheckBox("Attach a screenshot of the screen when it went wrong")
         self.attach.setChecked(s.notify_attach_screenshot)
         f.addRow("Alert", self.attach)
-        self.on_finish = QCheckBox("Also send a message when a macro finishes normally")
+        self.on_start = QCheckBox("When playback starts")
+        self.on_start.setChecked(s.notify_on_start)
+        f.addRow("Progress log", self.on_start)
+        self.each_run = QCheckBox("At the start of every run (with how long the last one took)")
+        self.each_run.setChecked(s.notify_each_run)
+        f.addRow("", self.each_run)
+        self.on_finish = QCheckBox("When playback finishes or is stopped")
         self.on_finish.setChecked(s.notify_on_finish)
         f.addRow("", self.on_finish)
+        f.addRow("", _hint("To get a picture at a set moment (say 1:34 into the macro), right-click the timeline "
+                           "there and choose <b>Send a screenshot here</b>, or use the arrow next to "
+                           "<b>◆ Checkpoint</b>. Messages are sent in order; if runs are very short, some "
+                           "run messages are skipped so the log keeps up."))
         self.test_btn = QPushButton("Send a test alert")
         self.test_btn.clicked.connect(self._send_test)
         self.net_status = QLabel("")
         self.net_status.setWordWrap(True)
         f.addRow("", _row(self.test_btn, self.net_status, None))
         self._service_changed()
-        return w
+        # taller than a 1080p screen once a service is set up: scroll instead
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        w.setObjectName("AlertsPage")
+        w.setStyleSheet("#AlertsPage { background: transparent; }")
+        scroll.setWidget(w)
+        return scroll
 
     @staticmethod
     def _subform():
@@ -367,9 +398,23 @@ class SettingsDialog(QDialog):
                 QSizePolicy.Preferred, QSizePolicy.Preferred if i == idx else QSizePolicy.Ignored)
         self.svc_stack.adjustSize()
         on = self.service.currentData() != "none"
-        for wdg in (self.attach, self.on_finish, self.test_btn):
+        for wdg in (self.attach, self.on_start, self.each_run, self.on_finish, self.test_btn):
             wdg.setEnabled(on)
         self.net_status.setText("")
+
+    def _mention_changed(self, *_):
+        text = self.discord_mention.text()
+        err = notify.mention_problem(text)
+        if err:
+            self.mention_note.setText(f"<span style='color:{theme.YELLOW}'>⚠ {err}</span>")
+            return
+        who, _allowed = notify.discord_mention(text)
+        lead = (f"Checkpoint failures mention <b>{who}</b>, so they stand out from the progress log and "
+                "ring your phone even if the channel only notifies for mentions." if who else
+                "Errors don't ping anyone.")
+        self.mention_note.setText(lead + " To ping only you, use your user ID: Discord settings, Advanced, "
+                                  "turn on Developer Mode, then right-click your name and Copy User ID. "
+                                  "Use &amp; and a role ID for a role.")
 
     def _notify_config(self) -> dict:
         return {
@@ -380,6 +425,7 @@ class SettingsDialog(QDialog):
             "telegram_token": self.tg_token.text().strip(),
             "telegram_chat_id": self.tg_chat.text().strip(),
             "discord_webhook": self.discord_url.text().strip(),
+            "discord_mention": self.discord_mention.text().strip(),
         }
 
     def _send_test(self):
@@ -390,8 +436,9 @@ class SettingsDialog(QDialog):
             return
         self.net_status.setText("Sending...")
         self.test_btn.setEnabled(False)
+        # pings like a real error would, so you can check the mention reaches you
         notify.send_async(cfg, "More Than Tiny Task", "Test alert: phone alerts work.", priority="default",
-                          tags="white_check_mark",
+                          tags="white_check_mark", ping=True,
                           on_done=lambda ok, text: self._relay.done.emit("test", ok, text))
 
     def _find_chat_id(self):
@@ -459,6 +506,9 @@ class SettingsDialog(QDialog):
         s.telegram_token = cfg["telegram_token"]
         s.telegram_chat_id = cfg["telegram_chat_id"]
         s.discord_webhook = cfg["discord_webhook"]
+        s.notify_mention = cfg["discord_mention"]
         s.notify_attach_screenshot = self.attach.isChecked()
         s.notify_on_finish = self.on_finish.isChecked()
+        s.notify_on_start = self.on_start.isChecked()
+        s.notify_each_run = self.each_run.isChecked()
         return s

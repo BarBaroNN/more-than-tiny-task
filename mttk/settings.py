@@ -66,7 +66,10 @@ class Settings:
     telegram_chat_id: str = ""
     discord_webhook: str = ""
     notify_attach_screenshot: bool = True
-    notify_on_finish: bool = False
+    notify_on_finish: bool = False     # message when playback finishes or is stopped
+    notify_on_start: bool = False      # message when playback starts
+    notify_each_run: bool = False      # message at the start of every run
+    notify_mention: str = "@everyone"  # Discord: who errors ping (@everyone, @here, user / role IDs)
     # mouse centring
     center_target: str = "cursor"  # 'cursor' or 'primary'
     center_duration_ms: int = 350

@@ -7,6 +7,7 @@ selecting events and dragging them in time.
 from __future__ import annotations
 
 import bisect
+import math
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -29,6 +30,27 @@ def fmt_time(t: float, decimals: int = 2) -> str:
     if m >= 1:
         return f"{int(m)}:{s:0{3 + decimals if decimals else 2}.{decimals}f}"
     return f"{s:.{decimals}f}s"
+
+
+def parse_time(text: str) -> Optional[float]:
+    """A time typed by hand -> seconds: '1:34', '1:34.5', '94', '94.5s', '1:02:03'.
+    None when it isn't one."""
+    t = (text or "").strip().lower()
+    if t.endswith("s"):
+        t = t[:-1].strip()
+    parts = t.split(":")
+    if not t or len(parts) > 3:
+        return None
+    total = 0.0
+    for part in parts:
+        try:
+            n = float(part)
+        except ValueError:
+            return None
+        if not math.isfinite(n) or n < 0:
+            return None
+        total = total * 60 + n
+    return total
 
 
 @dataclass
@@ -581,18 +603,25 @@ class Timeline(QWidget):
         for n, (x, idx, e) in enumerate(xs):
             if x < self.HEADER_W - 200 or x > self.width() + 10:
                 continue
-            ok = e.ref in self.check_info
-            color = QColor(theme.TRACK_COLORS[CHECK] if ok else theme.RED)
+            spec = self.check_info.get(e.ref)
+            ok = spec is not None
+            photo = ok and not vision.compares(spec)   # only sends a picture: drawn as a blue dot
+            color = QColor(theme.RED if not ok else theme.ACCENT if photo else theme.TRACK_COLORS[CHECK])
             line = QColor(color)
             line.setAlpha(70)
             p.setPen(QPen(line, 1, Qt.DashLine))
             p.drawLine(QPointF(x, self.RULER_H), QPointF(x, y0))
-            diamond = QPolygonF([QPointF(x, cy - 7), QPointF(x + 7, cy), QPointF(x, cy + 7), QPointF(x - 7, cy)])
             selected = idx in self.selected
             p.setPen(QPen(QColor("white"), 1.5) if selected else QPen(color.darker(150), 1))
             p.setBrush(color)
-            p.drawPolygon(diamond)
+            if photo:
+                p.drawEllipse(QPointF(x, cy), 6, 6)
+            else:
+                p.drawPolygon(QPolygonF([QPointF(x, cy - 7), QPointF(x + 7, cy), QPointF(x, cy + 7),
+                                         QPointF(x - 7, cy)]))
             label = self._check_name(e)
+            if vision.sends(spec):
+                label = "\U0001f4f7 " + label
             room = (xs[n + 1][0] if n + 1 < len(xs) else self.width()) - x - 14
             if room > 24:
                 p.setPen(QColor(theme.TEXT_DIM if ok else theme.RED))
@@ -726,7 +755,8 @@ class Timeline(QWidget):
                     ev = self.events[hit[0]]
                     if ev.kind == CHECK:
                         spec = self.check_info.get(ev.ref)
-                        tip = (f"◆ {self._check_name(ev)}\n{vision.describe(spec)}\nat {fmt_time(ev.t, 3)}"
+                        mark = "◆" if spec is None or vision.compares(spec) else "\U0001f4f7"
+                        tip = (f"{mark} {self._check_name(ev)}\n{vision.describe(spec)}\nat {fmt_time(ev.t, 3)}"
                                "  ·  double-click to edit")
                     else:
                         tip = f"{ev.describe()}\nat {fmt_time(ev.t, 3)}"
