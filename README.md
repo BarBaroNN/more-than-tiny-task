@@ -5,13 +5,14 @@
 **Record your mouse & keyboard. Edit it like a video. Replay it as many times as you want.**
 
 A free Windows macro recorder inspired by TinyTask, with a timeline editor, partial re-recording,
-delays between runs and a one-key "centre the mouse".
+delays between runs, screen checkpoints that stop a macro gone wrong, and progress updates and
+screenshots on your phone (Discord, Telegram or ntfy).
 
 [![Download](https://img.shields.io/badge/Download-Windows%20.exe-5b8cff?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/BarBaroNN/more-than-tiny-task/releases/latest/download/MoreThanTinyTask.exe)
 &nbsp;
 [![Latest release](https://img.shields.io/github/v/release/BarBaroNN/more-than-tiny-task?style=for-the-badge&color=2c313d)](https://github.com/BarBaroNN/more-than-tiny-task/releases/latest)
 
-<img src="docs/preview-playback.gif" alt="More Than Tiny Task playing a macro 10 times with a 1-minute delay" width="900">
+<img src="docs/preview-playback.gif" alt="More Than Tiny Task playing run 3 of 10, pausing at a screen checkpoint until the shop is open, then waiting a minute before run 4" width="900">
 
 </div>
 
@@ -33,6 +34,7 @@ More Than Tiny Task keeps the same **record → play** simplicity and adds:
 | Custom hotkeys, stay on top, compact mode, tray | — | ✅ |
 | Undo / redo | — | ✅ |
 | **Screen checkpoints**: stop and alert your phone if the screen looks wrong | — | ✅ |
+| **Progress log & screenshots on your phone** (each run, or a picture at 1:34) | — | ✅ |
 
 ## Download & run
 
@@ -96,6 +98,8 @@ A lag spike can make a macro turn a little too far or click a little too early, 
 2. **Choose what to compare.** Double-click a ◆ and drag over the part of the screen that must look like this, such as the shop window or a HUD element. Leave out things that change on their own (chat, timers, animations). A tight area works best: a change inside it counts for more of the score.
 3. **Decide how strict.** *Required match* (default 80%) is how much of the area must look the same, so a popup covering a corner doesn't stop the macro. *Wait up to* (default 5 s) gives a laggy screen time to catch up: playback pauses at the checkpoint and keeps checking, and everything after it waits too. *Allowed shift* lets the picture be a few pixels off. **Test against the screen now** shows the score you'd get.
 
+<img src="docs/preview-checkpoint.png" alt="Editing a screen checkpoint: the shop window is the area that must match" width="640">
+
 When a checkpoint fails, the macro **stops, releases every held key and mouse button**, beeps and shows what it expected next to what was on screen, including a hint when the view looks shifted (e.g. *"looks shifted by 60px left"*). Press F9 to continue from the failed checkpoint once things are fixed. *Screen checkpoints* under **Safety** turns checking off for a run.
 
 **Phone alerts** (Settings → Checkpoints & alerts) send you a notification with a screenshot when a checkpoint fails:
@@ -110,7 +114,11 @@ Press *Send a test alert* to check it works. Tokens and webhooks are stored in t
 
 **Progress log.** Under *Progress log* you can also get a message when playback starts, at the start of every run (with how long the last run took) and when it finishes or is stopped. Messages arrive in order; if runs are only a few seconds long, some run messages are skipped so the log keeps up.
 
+<img src="docs/preview-alerts.png" alt="Phone alert settings: Discord webhook, ping on errors and the progress log" width="560">
+
 **Screenshot points: a picture at a set moment.** To get a picture of the screen at, say, 1:34 into the macro, right-click the timeline there and choose **📷 Send a screenshot here** (or use the arrow next to **◆ Checkpoint**). Type the exact time in the *at* box, drag over the part of the screen to send (or keep the whole screen) and press *Send a test picture now* to try it. Every time playback reaches that moment, the picture is sent with the run number. Screenshot points show up as blue dots on the *Checks* track and never pause or stop the macro. Any checkpoint can do both: tick *Send a picture of the screen* on a normal checkpoint and it sends the whole screen, with the checked area outlined, whenever it matches.
+
+<img src="docs/preview-screenshot-point.png" alt="A screenshot point at 1:34 that sends the stats panel to your phone" width="640">
 
 > Checkpoints compare pictures; they don't read text. The app's own window and the REC / PLAY indicator are left out of the screenshots. Some games in exclusive full-screen mode show up black in screenshots: use borderless / windowed mode if *Test against the screen now* shows a black picture.
 
@@ -157,5 +165,6 @@ python -m pytest -q tests
 - `mttk/vision.py`: screen checkpoints: screenshot comparison and the checker used during playback
 - `mttk/notify.py`: phone alerts (ntfy, Telegram, Discord) using only the standard library
 - `mttk/ui/`: PySide6 interface (timeline, event table, settings, theme)
+- `tools/make_previews.py`: renders the pictures and the GIF in `docs/` (offscreen, with a demo macro; the GIF needs ffmpeg)
 
 </details>
